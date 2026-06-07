@@ -9,7 +9,7 @@
 *{margin:0;padding:0;box-sizing:border-box;}
 body{background:#0d0d1a;color:#eee;font-family:'Share Tech Mono',monospace;overflow:hidden;user-select:none;}
 #ui{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;z-index:100;background:#0d0d1a;}
-#lobby{text-align:center;background:rgba(15,20,50,0.97);border:1px solid #1a3060;border-radius:16px;padding:2.5rem 2rem;width:380px;box-shadow:0 0 60px rgba(78,204,163,0.08);}
+#lobby{text-align:center;background:rgba(15,20,50,0.97);border:1px solid #1a3060;border-radius:16px;padding:2.5rem 2rem;width:360px;box-shadow:0 0 60px rgba(78,204,163,0.08);}
 h1{font-family:'Orbitron',sans-serif;font-size:2rem;font-weight:900;color:#4ecca3;letter-spacing:4px;margin-bottom:.2rem;text-shadow:0 0 20px rgba(78,204,163,.5);}
 .sub{color:#445;font-size:.75rem;letter-spacing:3px;margin-bottom:1.8rem;}
 .sep{border:none;border-top:1px solid #1a3060;margin:1.1rem 0;}
@@ -17,10 +17,10 @@ h1{font-family:'Orbitron',sans-serif;font-size:2rem;font-weight:900;color:#4ecca
 .btn:disabled{opacity:.35;cursor:not-allowed;}
 .btn-g{color:#4ecca3;}.btn-g:hover:not(:disabled){background:#4ecca3;color:#0d0d1a;}
 .btn-r{color:#e94560;}.btn-r:hover:not(:disabled){background:#e94560;color:#fff;}
-input{background:rgba(15,50,80,.6);border:1px solid #4ecca3;color:#fff;padding:11px 14px;border-radius:8px;font-family:'Share Tech Mono',monospace;font-size:1.1rem;width:100%;margin:6px 0;outline:none;text-transform:uppercase;letter-spacing:6px;text-align:center;}
+input{background:rgba(15,50,80,.6);border:1px solid #4ecca3;color:#fff;padding:11px 14px;border-radius:8px;font-family:'Share Tech Mono',monospace;font-size:1.3rem;width:100%;margin:6px 0;outline:none;text-transform:uppercase;letter-spacing:8px;text-align:center;}
 input::placeholder{color:#334;letter-spacing:1px;text-transform:none;font-size:.82rem;}
-#status{font-size:.8rem;margin-top:10px;min-height:36px;line-height:1.7;}
-.code-box{font-family:'Orbitron',sans-serif;font-size:2.2rem;color:#4ecca3;letter-spacing:10px;background:rgba(78,204,163,.07);border:1px dashed #4ecca355;border-radius:10px;padding:14px;margin:10px 0;display:none;cursor:pointer;}
+#status{font-size:.8rem;margin-top:10px;min-height:40px;line-height:1.7;}
+.code-box{font-family:'Orbitron',sans-serif;font-size:2.4rem;color:#4ecca3;letter-spacing:12px;background:rgba(78,204,163,.07);border:1px dashed #4ecca355;border-radius:10px;padding:14px;margin:10px 0;display:none;cursor:pointer;}
 .code-box:hover{background:rgba(78,204,163,.15);}
 .code-hint{color:#445;font-size:.7rem;margin-top:2px;}
 .badge{display:inline-block;background:#4ecca322;border:1px solid #4ecca344;color:#4ecca3;font-size:.65rem;padding:2px 10px;border-radius:20px;letter-spacing:2px;margin-bottom:1rem;}
@@ -45,7 +45,7 @@ canvas{display:block;}
 <body>
 <div id="ui">
   <div id="lobby">
-    <div class="badge">🌐 P2P ONLINE</div>
+    <div class="badge">🌐 ONLINE MULTIPLAYER</div>
     <h1>⚔ SWORD DUEL</h1>
     <div class="sub">경험치 · 검 성장 · 1 VS 1</div>
     <hr class="sep">
@@ -53,7 +53,7 @@ canvas{display:block;}
     <div class="code-box" id="codeBox" onclick="copyCode()"></div>
     <div class="code-hint" id="codeHint"></div>
     <hr class="sep">
-    <input id="codeIn" maxlength="6" placeholder="방 코드 6자리 입력" oninput="this.value=this.value.toUpperCase().replace(/[^A-Z0-9]/g,'')">
+    <input id="codeIn" maxlength="6" placeholder="방 코드 입력" oninput="this.value=this.value.toUpperCase().replace(/[^A-Z0-9]/g,'')">
     <button class="btn btn-r" id="jBtn" onclick="joinRoom()">🚪 참가하기</button>
     <div id="status"></div>
   </div>
@@ -85,22 +85,100 @@ canvas{display:block;}
   </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <script>
-// ── Supabase ──
-const SUPA_URL = 'https://dbhyycsjnqwowdwzhqgk.supabase.co';
-const SUPA_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRiaHl5Y3NqbnF3b3dkd3pocWdrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA4MTM0ODgsImV4cCI6MjA5NjM4OTQ4OH0.oqeI0DlceqW9bsSL7u1RMQ8jZyYlEZQoSOTS6QGYFeU';
-const supa = supabase.createClient(SUPA_URL, SUPA_KEY);
+// ══════════════════════════════════════════
+// MQTT over WebSocket (no library needed)
+// Server: broker.emqx.io:8084 (free, public)
+// ══════════════════════════════════════════
+class MQTT {
+  constructor(){ this.ws=null; this.onmsg=null; this._buf=null; }
 
-let channel = null;
-let myRole = null, roomCode = '', gameRunning = false;
+  encLen(n){
+    if(n<128) return [n];
+    return [n&0x7f|0x80, n>>7];
+  }
+
+  strBytes(s){
+    const b=new TextEncoder().encode(s);
+    return [b.length>>8, b.length&0xff, ...b];
+  }
+
+  connect(url, clientId){
+    return new Promise((res,rej)=>{
+      this.ws = new WebSocket(url, ['mqtt']);
+      this.ws.binaryType='arraybuffer';
+      this.ws.onopen = ()=>{
+        // CONNECT packet
+        const proto=[0,4,77,81,84,84,4,0,0,60]; // MQTT v3.1.1, clean session, keepalive=60
+        const cid=this.strBytes(clientId);
+        const rem=[...proto,...cid];
+        const pkt=[0x10,...this.encLen(rem.length),...rem];
+        this.ws.send(new Uint8Array(pkt));
+      };
+      this.ws.onmessage=(e)=>{
+        const b=new Uint8Array(e.data);
+        const type=b[0]>>4;
+        if(type===2) res(); // CONNACK
+        else if(type===3) this._onPublish(b); // PUBLISH
+      };
+      this.ws.onerror=()=>rej(new Error('ws error'));
+      this.ws.onclose=()=>{ if(this.onclose)this.onclose(); };
+    });
+  }
+
+  subscribe(topic){
+    const t=this.strBytes(topic);
+    const rem=[0,1,...t,0]; // packet ID=1, QoS=0
+    const pkt=[0x82,...this.encLen(rem.length),...rem];
+    this.ws.send(new Uint8Array(pkt));
+  }
+
+  publish(topic,msg){
+    const t=this.strBytes(topic);
+    const m=new TextEncoder().encode(msg);
+    const rem=[...t,...m];
+    const pkt=[0x30,...this.encLen(rem.length),...rem];
+    this.ws.send(new Uint8Array(pkt));
+  }
+
+  _onPublish(b){
+    let i=1;
+    // skip remaining length bytes
+    while(b[i]&0x80)i++;
+    i++;
+    const tLen=(b[i]<<8)|b[i+1]; i+=2;
+    i+=tLen; // skip topic (we only use one topic)
+    const payload=new TextDecoder().decode(b.slice(i));
+    if(this.onmsg) this.onmsg(payload);
+  }
+
+  disconnect(){
+    if(this.ws){try{this.ws.close();}catch(e){}}
+    this.ws=null;
+  }
+}
+
+// ── State ──
+const mqtt = new MQTT();
+let myRole=null, roomCode='', gameRunning=false;
+let topic='';
+
+function randCode(){
+  const c='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let s='';for(let i=0;i<6;i++)s+=c[Math.floor(Math.random()*c.length)];
+  return s;
+}
+
+function send(type,payload={}){
+  if(!mqtt.ws||mqtt.ws.readyState!==1)return;
+  mqtt.publish(topic, JSON.stringify({type,payload,from:myRole}));
+}
 
 // ── Game constants ──
 const MAP_W=2400,MAP_H=2400,TILE=80;
 const SPEED=3.8,SWING_DUR=20,SWING_ARC=Math.PI*1.15,DMG=22;
-
 let gs=null,particles=[],cam={x:0,y:0};
-let swingCD=0,lastInputStr='',clicking=false;
+let swingCD=0,lastStr='',clicking=false;
 const keys={};
 let mx=0,my=0;
 
@@ -109,7 +187,7 @@ const mm=document.getElementById('minimap'),mctx=mm.getContext('2d');
 function resize(){canvas.width=window.innerWidth;canvas.height=window.innerHeight;}
 resize();window.addEventListener('resize',resize);
 
-// ── UI helpers ──
+// ── UI ──
 function st(msg,c='#4ecca3'){const e=document.getElementById('status');e.style.color=c;e.innerHTML=msg;}
 function setBtns(d){document.getElementById('hBtn').disabled=d;document.getElementById('jBtn').disabled=d;}
 function copyCode(){
@@ -117,59 +195,54 @@ function copyCode(){
   document.getElementById('codeHint').textContent='✅ 복사됨!';
   setTimeout(()=>document.getElementById('codeHint').textContent='클릭하면 복사',1500);
 }
-function randCode(){
-  const chars='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  let s='';for(let i=0;i<6;i++)s+=chars[Math.floor(Math.random()*chars.length)];
-  return s;
+
+async function connectMQTT(){
+  const cid='sd_'+(Math.random().toString(36).substring(2,10));
+  await mqtt.connect('wss://broker.emqx.io:8084/mqtt', cid);
+  mqtt.subscribe(topic);
+  mqtt.onmsg=(raw)=>{
+    try{ handleMsg(JSON.parse(raw)); }catch(e){}
+  };
+  mqtt.onclose=()=>{
+    if(gameRunning) document.getElementById('ch').textContent='⚠️ 연결 끊김';
+  };
 }
 
-// ── Network ──
-function send(type, payload={}){
-  if(!channel) return;
-  channel.send({type:'broadcast', event:'msg', payload:{type, payload, from:myRole}});
-}
-
-function setupChannel(code, onReady){
-  if(channel){supa.removeChannel(channel); channel=null;}
-  channel = supa.channel('swordduel_'+code, {
-    config:{ broadcast:{ self:false } }
-  });
-  channel.on('broadcast',{event:'msg'},({payload})=>handleMsg(payload));
-  channel.subscribe(status=>{
-    if(status==='SUBSCRIBED') onReady && onReady();
-    else if(status==='CHANNEL_ERROR'){
-      st('❌ 서버 연결 실패. 새로고침 해주세요.','#e94560');
-      setBtns(false);
-    }
-  });
-}
-
-// ── Host ──
-function hostRoom(){
+// ── Lobby ──
+async function hostRoom(){
   setBtns(true);
+  roomCode=randCode();
+  topic='swordduel/'+roomCode;
+  myRole='host';
   st('서버 연결 중...');
-  roomCode = randCode();
-  myRole = 'host';
-  setupChannel(roomCode, ()=>{
+  try{
+    await connectMQTT();
     const box=document.getElementById('codeBox');
     box.style.display='block'; box.textContent=roomCode;
     document.getElementById('codeHint').textContent='클릭하면 복사';
-    st('✅ 준비됨! 친구에게 <b>'+roomCode+'</b> 코드를 보내주세요.');
-  });
+    st('✅ 연결됨! 친구에게 <b style="color:#4ecca3;letter-spacing:4px">'+roomCode+'</b> 코드를 보내주세요.');
+  }catch(e){
+    st('❌ 서버 연결 실패. 새로고침 해주세요.','#e94560');
+    setBtns(false);
+  }
 }
 
-// ── Guest ──
-function joinRoom(){
+async function joinRoom(){
   const code=document.getElementById('codeIn').value.trim().toUpperCase();
-  if(code.length<4){st('방 코드를 입력하세요','#e94560');return;}
+  if(code.length!==6){st('6자리 코드를 입력하세요','#e94560');return;}
   roomCode=code; myRole='guest';
+  topic='swordduel/'+code;
   setBtns(true);
   st('서버 연결 중...');
-  setupChannel(code, ()=>{
+  try{
+    await connectMQTT();
     st('✅ 연결됨! 참가 신호 전송 중...');
     send('join');
-  });
-  setTimeout(()=>{if(!gameRunning){st('⚠️ 응답 없음.<br>호스트가 먼저 방을 만들어야 합니다.','#e94560');setBtns(false);}},12000);
+    setTimeout(()=>{if(!gameRunning){st('⚠️ 응답 없음. 호스트가 먼저 방을 만들어야 합니다.','#e94560');setBtns(false);}},12000);
+  }catch(e){
+    st('❌ 서버 연결 실패. 새로고침 해주세요.','#e94560');
+    setBtns(false);
+  }
 }
 
 // ── Game state ──
@@ -179,18 +252,11 @@ function mkP(x,y,color){
 }
 function mkOrbs(n=35){
   const o=[];
-  for(let i=0;i<n;i++) o.push({
-    x:120+Math.random()*(MAP_W-240),y:120+Math.random()*(MAP_H-240),
-    r:7,value:10+Math.floor(Math.random()*25),alive:true,pulse:Math.random()*Math.PI*2
-  });
+  for(let i=0;i<n;i++) o.push({x:120+Math.random()*(MAP_W-240),y:120+Math.random()*(MAP_H-240),r:7,value:10+Math.floor(Math.random()*25),alive:true,pulse:Math.random()*Math.PI*2});
   return o;
 }
 function initGS(){
-  gs={
-    host:mkP(200,200,'#4ecca3'),
-    guest:mkP(MAP_W-200,MAP_H-200,'#e94560'),
-    orbs:mkOrbs(35),tick:0,over:false,winner:null
-  };
+  gs={host:mkP(200,200,'#4ecca3'),guest:mkP(MAP_W-200,MAP_H-200,'#e94560'),orbs:mkOrbs(35),tick:0,over:false,winner:null};
 }
 
 // ── Input ──
@@ -224,9 +290,9 @@ function processInput(){
   }
   if(swingCD>0)swingCD--;
   const s=`${Math.round(me.x)},${Math.round(me.y)},${me.aimAngle?.toFixed(3)},${me.swinging},${me.swingStart?.toFixed(3)}`;
-  if(s!==lastInputStr){
+  if(s!==lastStr){
     send('input',{x:me.x,y:me.y,aimAngle:me.aimAngle,swinging:me.swinging,swingStart:me.swingStart});
-    lastInputStr=s;
+    lastStr=s;
   }
 }
 
@@ -253,8 +319,7 @@ function simulate(){
     const p=gs[r];if(p.dead)return;
     gs.orbs.forEach(o=>{
       if(!o.alive)return;
-      const dx=p.x-o.x,dy=p.y-o.y;
-      if(Math.sqrt(dx*dx+dy*dy)<18+o.r){
+      if(Math.hypot(p.x-o.x,p.y-o.y)<18+o.r){
         o.alive=false;p.xp+=o.value;
         while(p.xp>=p.xpNext){p.xp-=p.xpNext;p.xpNext=Math.floor(p.xpNext*1.5);p.swordLen+=24;}
       }
@@ -286,7 +351,6 @@ function spawnP(x,y,col,n=8){
     particles.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,life:40,maxLife:40,col});
   }
 }
-
 const tileImg=document.createElement('canvas');tileImg.width=tileImg.height=TILE;
 (()=>{const t=tileImg.getContext('2d');t.fillStyle='#0f0f1e';t.fillRect(0,0,TILE,TILE);t.strokeStyle='#141428';t.lineWidth=1;t.strokeRect(0,0,TILE,TILE);})();
 let tilePat=null;
@@ -300,7 +364,6 @@ function drawMap(){
   ctx.strokeStyle='#e9456066';ctx.lineWidth=3;
   ctx.strokeRect(-cam.x,-cam.y,MAP_W,MAP_H);ctx.restore();
 }
-
 function drawOrbs(){
   const W=canvas.width,H=canvas.height;
   gs.orbs.forEach(o=>{
@@ -316,7 +379,6 @@ function drawOrbs(){
     ctx.fillText('+'+o.value,sx,sy);
   });
 }
-
 function drawPlayer(p,isMe){
   const sx=p.x-cam.x,sy=p.y-cam.y;
   const W=canvas.width,H=canvas.height;
@@ -348,7 +410,6 @@ function drawPlayer(p,isMe){
   }
   ctx.globalAlpha=1;
 }
-
 function drawParticles(){
   particles=particles.filter(p=>p.life>0);
   particles.forEach(p=>{
@@ -359,7 +420,6 @@ function drawParticles(){
   });
   ctx.globalAlpha=1;
 }
-
 function drawMinimap(){
   const sw=150/MAP_W,sh=150/MAP_H;
   mctx.clearRect(0,0,150,150);
@@ -377,7 +437,6 @@ function drawMinimap(){
   mctx.strokeStyle='#fff2';mctx.lineWidth=1;
   mctx.strokeRect(cam.x*sw,cam.y*sh,canvas.width*sw,canvas.height*sh);
 }
-
 function updateHUD(){
   if(!gs)return;
   const me=myRole==='host'?gs.host:gs.guest;
@@ -397,15 +456,15 @@ function updateHUD(){
 }
 
 // ── Main loop ──
-let stThrottle=0;
+let stT=0;
 function loop(){
   requestAnimationFrame(loop);
   if(!gameRunning||!gs)return;
   processInput();
   if(myRole==='host'){
     simulate();
-    if(++stThrottle>=2){
-      stThrottle=0;
+    if(++stT>=2){
+      stT=0;
       send('state',{
         hx:Math.round(gs.host.x),hy:Math.round(gs.host.y),hhp:gs.host.hp,
         hxp:gs.host.xp,hxpn:gs.host.xpNext,hsl:Math.round(gs.host.swordLen),
@@ -441,7 +500,7 @@ function handleMsg(msg){
   if(msg.type==='join'&&myRole==='host'){
     st('상대방 입장! 게임 시작!');
     initGS();
-    send('start', gs);
+    send('start',gs);
     setTimeout(()=>startGame(),300);
   }
   if(msg.type==='start'&&myRole==='guest'){gs=msg.payload;startGame();}
@@ -471,9 +530,8 @@ function startGame(){
 
 function backToLobby(){
   gameRunning=false;gs=null;
-  if(channel){supa.removeChannel(channel);channel=null;}
-  myRole=null;
-  particles=[];swingCD=0;lastInputStr='';
+  mqtt.disconnect();
+  myRole=null;particles=[];swingCD=0;lastStr='';
   document.getElementById('overlay').style.display='none';
   document.getElementById('gameContainer').style.display='none';
   document.getElementById('ui').style.display='flex';
