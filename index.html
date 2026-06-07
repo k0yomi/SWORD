@@ -53,7 +53,7 @@ canvas{display:block;}
     <div class="code-box" id="codeBox" onclick="copyCode()"></div>
     <div class="code-hint" id="codeHint"></div>
     <hr class="sep">
-    <input id="codeIn" maxlength="20" placeholder="방 코드 붙여넣기">
+    <input id="codeIn" maxlength="6" placeholder="방 코드 6자리 입력" oninput="this.value=this.value.toUpperCase().replace(/[^A-Z0-9]/g,'')">
     <button class="btn btn-r" id="jBtn" onclick="joinRoom()">🚪 참가하기</button>
     <div id="status"></div>
   </div>
@@ -141,15 +141,16 @@ function setupConn(c){
 // ── Host ──
 function hostRoom(){
   setBtns(true);
-  st('피어 서버 연결 중...');
-  peer = new Peer(undefined, PEER_CFG);
-  peer.on('open', id=>{
-    roomCode = id;
+  st('서버 연결 중...');
+  const code = randCode();
+  roomCode = code;
+  myRole = 'host';
+  peer = new Peer('swordduel-'+code, PEER_CFG);
+  peer.on('open', ()=>{
     const box=document.getElementById('codeBox');
-    box.style.display='block'; box.textContent=id;
+    box.style.display='block'; box.textContent=code;
     document.getElementById('codeHint').textContent='클릭하면 복사';
-    st('✅ 준비됨! 친구에게 코드를 보내주세요.<br><span style="color:#556">코드를 복사해서 카톡/디스코드로 전송</span>');
-    myRole='host';
+    st('✅ 준비됨! 친구에게 <b>'+code+'</b> 코드를 보내주세요.');
   });
   peer.on('connection', c=>{
     setupConn(c);
@@ -160,23 +161,32 @@ function hostRoom(){
       setTimeout(()=>startGame(),300);
     });
   });
-  peer.on('error',e=>{st('❌ 오류: '+e.type+'<br>새로고침 후 다시 시도','#e94560');setBtns(false);});
+  peer.on('error',e=>{
+    if(e.type==='unavailable-id'){
+      // ID taken, retry with new code
+      peer.destroy();
+      setTimeout(hostRoom,500);
+    } else {
+      st('❌ 오류: '+e.type+'<br>새로고침 후 다시 시도','#e94560');
+      setBtns(false);
+    }
+  });
 }
 
 // ── Guest ──
 function joinRoom(){
-  const code=document.getElementById('codeIn').value.trim();
-  if(!code){st('방 코드를 붙여넣으세요','#e94560');return;}
+  const code=document.getElementById('codeIn').value.trim().toUpperCase();
+  if(code.length<4){st('방 코드를 입력하세요','#e94560');return;}
   roomCode=code; myRole='guest';
   setBtns(true);
-  st('피어 서버 연결 중...');
+  st('서버 연결 중...');
   peer = new Peer(undefined, PEER_CFG);
   peer.on('open',()=>{
     st('호스트에 연결 중...');
-    const c = peer.connect(code, {reliable:true});
+    const c = peer.connect('swordduel-'+code, {reliable:true});
     setupConn(c);
     c.on('open',()=>st('✅ 연결됨! 호스트 응답 대기 중...'));
-    setTimeout(()=>{if(!gameRunning)st('⚠️ 연결 실패.<br>코드를 확인하거나 호스트가 먼저 방을 만들어야 합니다.','#e94560');setBtns(false);},12000);
+    setTimeout(()=>{if(!gameRunning){st('⚠️ 연결 실패.<br>코드를 확인하거나 호스트가 먼저 방을 만들어야 합니다.','#e94560');setBtns(false);}},12000);
   });
   peer.on('error',e=>{st('❌ 오류: '+e.type+'<br>코드를 확인해주세요','#e94560');setBtns(false);});
 }
