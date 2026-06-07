@@ -322,19 +322,18 @@ function handleMsg(m){
       orbs.push({x:p.no.x,y:p.no.y,r:8,value:p.no.v,alive:true,pulse:Math.random()*Math.PI*2,id:p.no.id});
   }
   if(t==='hit'){
-    // 철갑 적용
     const dmg=p.d*(1-Math.min(0.7,me.dmgReduction));
     me.hp=Math.max(0,me.hp-dmg);
     spawnP(me.x,me.y,'#e94560',12);
-    if(me.hp<=0){me.dead=true;endGame(false);}
+    if(me.hp<=0&&!me.dead){me.dead=true;send('dead',{});endGame(false);}
   }
   if(t==='blade_hit'){
     const dmg=p.d*(1-Math.min(0.7,me.dmgReduction));
     me.hp=Math.max(0,me.hp-dmg);
     spawnP(me.x,me.y,'#f0c040',8);
-    if(me.hp<=0){me.dead=true;endGame(false);}
+    if(me.hp<=0&&!me.dead){me.dead=true;send('dead',{});endGame(false);}
   }
-  if(t==='dead'){op.dead=true;endGame(false);} // 상대가 나를 죽였다 = 내가 패배
+  if(t==='dead'){op.dead=true;endGame(true);} // 상대가 죽었다 = 내가 승리
   if(t==='skill'){
     op.skills=op.skills||[];
     op.skills.push(p.key);
@@ -342,9 +341,10 @@ function handleMsg(m){
     updateSkillHUD();
   }
   if(t==='proj'){
-    // 상대가 쏜 검기 (시각용)
-    projectiles.push({x:p.x,y:p.y,vx:p.vx,vy:p.vy,color:op.color,life:60,fromOp:true,id:p.id});
+    projectiles.push({x:p.x,y:p.y,vx:p.vx,vy:p.vy,color:op.color||'#e94560',life:1.2,maxLife:1.2,fromOp:true,id:p.id});
   }
+  // 상대 HP 동기화 (pos 메시지로 받은 실제 HP 반영)
+  if(t==='pos'&&p.hp!==undefined) op.hp=p.hp;
 }
 
 // ── 입력 ──
@@ -409,7 +409,7 @@ function updateMe(dt){
       const spd=480; // px/초
       const vx=Math.cos(me.aimAngle)*spd,vy=Math.sin(me.aimAngle)*spd;
       const pid=Date.now()%1000000;
-      projectiles.push({x:me.x,y:me.y,vx,vy,color:me.color,life:1.2,fromOp:false,id:pid});
+      projectiles.push({x:me.x,y:me.y,vx,vy,color:me.color,life:1.2,maxLife:1.2,fromOp:false,id:pid});
       send('proj',{x:Math.round(me.x),y:Math.round(me.y),vx:+vx.toFixed(1),vy:+vy.toFixed(1),id:pid});
     }
   }
@@ -445,16 +445,15 @@ function updateMe(dt){
   if(frameCount%150===0)orbs=orbs.filter(o=>o.alive);
 
   // 검 타격 판정 (검 전체 5점 체크)
+  // ※ 공격자는 endGame 호출 안 함 — 피격자가 자신의 죽음을 결정
   if(me.swinging&&!me.hitThisSwing&&!op.dead&&op.x){
     const ang=me.swordAngle,sl=me.swordLen;
     for(let k=0;k<=5;k++){
       const r=k/5;
       if(Math.hypot(me.x+Math.cos(ang)*(16+sl*r)-op.x, me.y+Math.sin(ang)*(16+sl*r)-op.y)<28){
         me.hitThisSwing=true;
-        op.hp=Math.max(0,op.hp-BASE_DMG);
         spawnP(op.rx||op.x,op.ry||op.y,'#e94560',12);
-        send('hit',{d:BASE_DMG});
-        if(op.hp<=0){op.dead=true;send('dead',{});endGame(true);}
+        send('hit',{d:BASE_DMG}); // 피격자가 HP 계산 후 dead 여부 결정
         break;
       }
     }
@@ -467,19 +466,17 @@ function updateMe(dt){
     proj.x+=proj.vx*dt;proj.y+=proj.vy*dt;proj.life-=dt;
     if(proj.life<=0){projectiles.splice(i,1);continue;}
     if(op.x&&Math.hypot(proj.x-op.x,proj.y-op.y)<22){
-      op.hp=Math.max(0,op.hp-12);
       spawnP(op.rx||op.x,op.ry||op.y,'#f0c040',8);
-      send('blade_hit',{d:12});
+      send('blade_hit',{d:12}); // 피격자가 HP 계산
       projectiles.splice(i,1);
-      if(op.hp<=0){op.dead=true;send('dead',{});endGame(true);}
     }
   }
 
-  // 위치 전송 (30fps)
+  // 위치 전송 (30fps) — 내 실제 HP도 포함
   const now=Date.now();
   if(now-lastPosSent>=33){
     lastPosSent=now;
-    send('pos',{x:Math.round(me.x),y:Math.round(me.y),sa:+me.swordAngle.toFixed(3),sw:me.swinging,ss:+me.swingStart.toFixed(3),sl:Math.round(me.swordLen),xp:me.totalXp});
+    send('pos',{x:Math.round(me.x),y:Math.round(me.y),sa:+me.swordAngle.toFixed(3),sw:me.swinging,ss:+me.swingStart.toFixed(3),sl:Math.round(me.swordLen),xp:me.totalXp,hp:Math.round(me.hp)});
   }
 }
 // ── 상대 업데이트 (보간 버퍼) ──
@@ -564,13 +561,20 @@ function drawOrbs(){
 function drawProjectiles(){
   for(const p of projectiles){
     const sx=p.x-cam.x,sy=p.y-cam.y;
-    const a=p.life/60;
-    ctx.save();ctx.globalAlpha=a;ctx.shadowColor=p.color;ctx.shadowBlur=15;
-    ctx.beginPath();ctx.arc(sx,sy,5,0,Math.PI*2);
+    const W=canvas.width,H=canvas.height;
+    if(sx<-30||sx>W+30||sy<-30||sy>H+30)continue;
+    // life는 초 단위(0~1.2), alpha는 0~1
+    const a=Math.min(1,p.life/p.maxLife);
+    const spd=Math.hypot(p.vx,p.vy)||1;
+    const nx=p.vx/spd,ny=p.vy/spd; // 정규화된 방향
+    ctx.save();ctx.globalAlpha=Math.max(0.2,a);
+    ctx.shadowColor=p.color;ctx.shadowBlur=18;
+    // 검기 본체
+    ctx.beginPath();ctx.arc(sx,sy,6,0,Math.PI*2);
     ctx.fillStyle=p.color;ctx.fill();
-    // 꼬리
-    ctx.beginPath();ctx.moveTo(sx,sy);ctx.lineTo(sx-p.vx*4,sy-p.vy*4);
-    ctx.strokeStyle=p.color;ctx.lineWidth=2;ctx.stroke();
+    // 꼬리 (정규화 방향으로 16px)
+    ctx.beginPath();ctx.moveTo(sx,sy);ctx.lineTo(sx-nx*16,sy-ny*16);
+    ctx.strokeStyle=p.color;ctx.lineWidth=3;ctx.stroke();
     ctx.restore();
   }
 }
