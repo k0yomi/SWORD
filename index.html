@@ -85,19 +85,14 @@ canvas{display:block;}
   </div>
 </div>
 
-<script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <script>
-// ── PeerJS config ──
-const PEER_CFG = {
-  host: '0.peerjs.com', port: 443, path: '/',
-  secure: true,
-  config: { iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' }
-  ]}
-};
+// ── Supabase ──
+const SUPA_URL = 'https://dbhyycsjnqwowdwzhqgk.supabase.co';
+const SUPA_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRiaHl5Y3NqbnF3b3dkd3pocWdrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA4MTM0ODgsImV4cCI6MjA5NjM4OTQ4OH0.oqeI0DlceqW9bsSL7u1RMQ8jZyYlEZQoSOTS6QGYFeU';
+const supa = supabase.createClient(SUPA_URL, SUPA_KEY);
 
-let peer = null, conn = null;
+let channel = null;
 let myRole = null, roomCode = '', gameRunning = false;
 
 // ── Game constants ──
@@ -123,53 +118,38 @@ function copyCode(){
   setTimeout(()=>document.getElementById('codeHint').textContent='클릭하면 복사',1500);
 }
 
-// ── Network send ──
-function send(type,payload={}){
-  if(conn&&conn.open) conn.send({type,payload,from:myRole});
+// ── Network ──
+function send(type, payload={}){
+  if(!channel) return;
+  channel.send({type:'broadcast', event:'msg', payload:{type, payload, from:myRole}});
 }
 
-// ── Setup connection events ──
-function setupConn(c){
-  conn=c;
-  conn.on('data',handleMsg);
-  conn.on('close',()=>{
-    if(gameRunning){document.getElementById('ch').textContent='⚠️ 연결 끊김';}
+function setupChannel(code, onReady){
+  if(channel){supa.removeChannel(channel); channel=null;}
+  channel = supa.channel('swordduel_'+code, {
+    config:{ broadcast:{ self:false } }
   });
-  conn.on('error',e=>console.warn('conn err',e));
+  channel.on('broadcast',{event:'msg'},({payload})=>handleMsg(payload));
+  channel.subscribe(status=>{
+    if(status==='SUBSCRIBED') onReady && onReady();
+    else if(status==='CHANNEL_ERROR'){
+      st('❌ 서버 연결 실패. 새로고침 해주세요.','#e94560');
+      setBtns(false);
+    }
+  });
 }
 
 // ── Host ──
 function hostRoom(){
   setBtns(true);
   st('서버 연결 중...');
-  const code = randCode();
-  roomCode = code;
+  roomCode = randCode();
   myRole = 'host';
-  peer = new Peer('swordduel-'+code, PEER_CFG);
-  peer.on('open', ()=>{
+  setupChannel(roomCode, ()=>{
     const box=document.getElementById('codeBox');
-    box.style.display='block'; box.textContent=code;
+    box.style.display='block'; box.textContent=roomCode;
     document.getElementById('codeHint').textContent='클릭하면 복사';
-    st('✅ 준비됨! 친구에게 <b>'+code+'</b> 코드를 보내주세요.');
-  });
-  peer.on('connection', c=>{
-    setupConn(c);
-    conn.on('open',()=>{
-      st('상대방 입장! 게임 시작!');
-      initGS();
-      send('start', gs);
-      setTimeout(()=>startGame(),300);
-    });
-  });
-  peer.on('error',e=>{
-    if(e.type==='unavailable-id'){
-      // ID taken, retry with new code
-      peer.destroy();
-      setTimeout(hostRoom,500);
-    } else {
-      st('❌ 오류: '+e.type+'<br>새로고침 후 다시 시도','#e94560');
-      setBtns(false);
-    }
+    st('✅ 준비됨! 친구에게 <b>'+roomCode+'</b> 코드를 보내주세요.');
   });
 }
 
@@ -180,15 +160,11 @@ function joinRoom(){
   roomCode=code; myRole='guest';
   setBtns(true);
   st('서버 연결 중...');
-  peer = new Peer(undefined, PEER_CFG);
-  peer.on('open',()=>{
-    st('호스트에 연결 중...');
-    const c = peer.connect('swordduel-'+code, {reliable:true});
-    setupConn(c);
-    c.on('open',()=>st('✅ 연결됨! 호스트 응답 대기 중...'));
-    setTimeout(()=>{if(!gameRunning){st('⚠️ 연결 실패.<br>코드를 확인하거나 호스트가 먼저 방을 만들어야 합니다.','#e94560');setBtns(false);}},12000);
+  setupChannel(code, ()=>{
+    st('✅ 연결됨! 참가 신호 전송 중...');
+    send('join');
   });
-  peer.on('error',e=>{st('❌ 오류: '+e.type+'<br>코드를 확인해주세요','#e94560');setBtns(false);});
+  setTimeout(()=>{if(!gameRunning){st('⚠️ 응답 없음.<br>호스트가 먼저 방을 만들어야 합니다.','#e94560');setBtns(false);}},12000);
 }
 
 // ── Game state ──
@@ -457,6 +433,12 @@ function loop(){
 // ── Message handler ──
 function handleMsg(msg){
   if(!msg||!msg.type)return;
+  if(msg.type==='join'&&myRole==='host'){
+    st('상대방 입장! 게임 시작!');
+    initGS();
+    send('start', gs);
+    setTimeout(()=>startGame(),300);
+  }
   if(msg.type==='start'&&myRole==='guest'){gs=msg.payload;startGame();}
   if(msg.type==='input'&&myRole==='host')applyInput(msg.from,msg.payload);
   if(msg.type==='state'&&myRole==='guest'){
@@ -484,9 +466,8 @@ function startGame(){
 
 function backToLobby(){
   gameRunning=false;gs=null;
-  if(conn){try{conn.close();}catch(e){}}
-  if(peer){try{peer.destroy();}catch(e){}}
-  conn=null;peer=null;myRole=null;
+  if(channel){supa.removeChannel(channel);channel=null;}
+  myRole=null;
   particles=[];swingCD=0;lastInputStr='';
   document.getElementById('overlay').style.display='none';
   document.getElementById('gameContainer').style.display='none';
