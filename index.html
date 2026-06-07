@@ -303,9 +303,13 @@ function handleMsg(m){
     startGame();
   }
   if(t==='pos'){
-    opBuf.push({ts:Date.now(),x:p.x,y:p.y,sa:p.sa,sw:p.sw,ss:p.ss,sl:p.sl,xp:p.xp});
+    // 판정용: 최신 실제 위치 즉시 적용
+    op.x=p.x; op.y=p.y;
+    op.swordLen=p.sl; op.totalXp=p.xp;
+    op.realSa=p.sa; op.realSw=p.sw; op.realSs=p.ss;
+    // 렌더링용: 보간 버퍼에 추가
+    opBuf.push({ts:Date.now(),x:p.x,y:p.y,sa:p.sa,sw:p.sw,ss:p.ss});
     if(opBuf.length>12)opBuf.shift();
-    op.swordLen=p.sl;op.totalXp=p.xp;
   }
   if(t==='orb'){
     const o=orbs.find(o=>o.id===p.id);
@@ -326,7 +330,7 @@ function handleMsg(m){
     spawnP(me.x,me.y,'#f0c040',8);
     if(me.hp<=0){me.dead=true;endGame(false);}
   }
-  if(t==='dead'){op.dead=true;endGame(true);}
+  if(t==='dead'){op.dead=true;endGame(false);} // 상대가 나를 죽였다 = 내가 패배
   if(t==='skill'){
     op.skills=op.skills||[];
     op.skills.push(p.key);
@@ -435,14 +439,23 @@ function updateMe(){
   // 죽은 구슬 정리 (150프레임마다)
   if(frameCount%150===0)orbs=orbs.filter(o=>o.alive);
 
-  // 검 타격 판정
+  // 검 타격 판정 - 검 전체 길이를 여러 점으로 체크해 판정 누락 방지
   if(me.swinging&&!me.hitThisSwing&&!op.dead&&op.x){
-    const tipX=me.x+Math.cos(me.swordAngle)*me.swordLen;
-    const tipY=me.y+Math.sin(me.swordAngle)*me.swordLen;
-    if(Math.hypot(tipX-op.x,tipY-op.y)<24){
+    const ang=me.swordAngle;
+    const sl=me.swordLen;
+    let hit=false;
+    // 검 시작~끝까지 5점 체크
+    for(let k=0;k<=5;k++){
+      const ratio=k/5;
+      const checkX=me.x+Math.cos(ang)*(16+sl*ratio);
+      const checkY=me.y+Math.sin(ang)*(16+sl*ratio);
+      // op.x/y = 판정용 실제 위치 (지연 없음), 히트박스 28px
+      if(Math.hypot(checkX-op.x,checkY-op.y)<28){hit=true;break;}
+    }
+    if(hit){
       me.hitThisSwing=true;
       op.hp=Math.max(0,op.hp-BASE_DMG);
-      spawnP(op.x,op.y,'#e94560',12);
+      spawnP(op.rx||op.x,op.ry||op.y,'#e94560',12);
       send('hit',{d:BASE_DMG});
       if(op.hp<=0){op.dead=true;send('dead',{});endGame(true);}
     }
@@ -451,12 +464,12 @@ function updateMe(){
   // 검기 충돌
   for(let i=projectiles.length-1;i>=0;i--){
     const proj=projectiles[i];
-    if(proj.fromOp)continue; // 상대 검기는 내가 처리 안 함 (상대가 처리)
+    if(proj.fromOp)continue;
     proj.x+=proj.vx;proj.y+=proj.vy;proj.life--;
     if(proj.life<=0){projectiles.splice(i,1);continue;}
-    if(op.x&&Math.hypot(proj.x-op.x,proj.y-op.y)<20){
+    if(op.x&&Math.hypot(proj.x-op.x,proj.y-op.y)<22){
       op.hp=Math.max(0,op.hp-12);
-      spawnP(op.x,op.y,'#f0c040',8);
+      spawnP(op.rx||op.x,op.ry||op.y,'#f0c040',8);
       send('blade_hit',{d:12});
       projectiles.splice(i,1);
       if(op.hp<=0){op.dead=true;send('dead',{});endGame(true);}
@@ -494,13 +507,14 @@ function updateOp(){
   }
   if(!prev){
     const last=opBuf[opBuf.length-1];
-    op.x=last.x;op.y=last.y;op.swordAngle=last.sa||0;
+    op.rx=last.x; op.ry=last.y; // 렌더링 위치
+    op.swordAngle=last.sa||0;
     if(last.sw&&!op.swinging){op.swinging=true;op.swingT=0;op.swingStart=last.ss||0;}
     return;
   }
   const t=prev.ts===next.ts?1:(renderTime-prev.ts)/(next.ts-prev.ts);
-  op.x=prev.x+(next.x-prev.x)*t;
-  op.y=prev.y+(next.y-prev.y)*t;
+  op.rx=prev.x+(next.x-prev.x)*t; // 렌더링만 보간
+  op.ry=prev.y+(next.y-prev.y)*t;
   op.swordAngle=(prev.sa||0)+((next.sa||0)-(prev.sa||0))*t;
   if(next.sw&&!op.swinging){op.swinging=true;op.swingT=0;op.swingStart=next.ss||0;}
   if(op.swinging){
@@ -563,7 +577,10 @@ function drawProjectiles(){
 
 function drawPlayer(p,isMe){
   if(!p||!p.x)return;
-  const sx=p.x-cam.x,sy=p.y-cam.y;
+  // 상대는 보간된 렌더링 위치 사용, 나는 실제 위치 사용
+  const drawX = isMe ? p.x : (p.rx||p.x);
+  const drawY = isMe ? p.y : (p.ry||p.y);
+  const sx=drawX-cam.x,sy=drawY-cam.y;
   const W=canvas.width,H=canvas.height;
   if(sx<-200||sx>W+200||sy<-200||sy>H+200)return;
   ctx.globalAlpha=p.dead?.3:1;
