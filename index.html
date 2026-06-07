@@ -207,7 +207,7 @@ async function connectMQTT(code){
 
 // ── Player factory ──
 function mkPlayer(x,y,color){
-  return { x, y, hp:100, maxHp:100, xp:0, xpNext:100, swordLen:60,
+  return { x, y, hp:100, maxHp:100, xp:0, xpNext:40, swordLen:60,
            swordAngle:0, swinging:false, swingT:0, swingStart:0,
            dead:false, color, hitThisSwing:false };
 }
@@ -270,12 +270,14 @@ function handleMsg(m){
     startGame();
   }
 
-  // 상대 위치/상태 업데이트
+  // 상대 위치/상태 업데이트 (보간 목표값 설정)
   if(t==='pos'){
-    op.x=p.x; op.y=p.y;
+    op.tx=p.x; op.ty=p.y;  // 보간 목표
+    if(!op.x){ op.x=p.x; op.y=p.y; } // 첫 수신시 즉시 적용
     op.swordAngle=p.sa;
     op.swinging=p.sw;
     op.swingStart=p.ss;
+    op.swingT=0;
     op.swordLen=p.sl;
     op.xp=p.xp; op.xpNext=p.xpn;
   }
@@ -355,7 +357,7 @@ function updateMe(){
     if(Math.hypot(me.x-o.x, me.y-o.y)<18+o.r){
       o.alive=false;
       me.xp+=o.value;
-      while(me.xp>=me.xpNext){ me.xp-=me.xpNext; me.xpNext=Math.floor(me.xpNext*1.5); me.swordLen+=24; }
+      while(me.xp>=me.xpNext){ me.xp-=me.xpNext; me.xpNext=Math.floor(me.xpNext*1.4); me.swordLen+=35; }
       // 새 구슬 생성
       const newOrb={ x:Math.round(120+Math.random()*(MAP_W-240)), y:Math.round(120+Math.random()*(MAP_H-240)), v:10+Math.floor(Math.random()*25), id:Date.now()+Math.floor(Math.random()*1000) };
       orbs.push({...newOrb,r:7,alive:true,pulse:Math.random()*Math.PI*2});
@@ -380,20 +382,25 @@ function updateMe(){
     }
   }
 
-  // 위치 전송 (20fps)
+  // 위치 전송 (60fps)
   const now=Date.now();
-  if(now-lastPosSent>50){
+  if(now-lastPosSent>16){
     lastPosSent=now;
     send('pos',{
       x:Math.round(me.x), y:Math.round(me.y),
-      sa:me.swordAngle, sw:me.swinging, ss:me.swingStart,
+      sa:+me.swordAngle.toFixed(4), sw:me.swinging, ss:+me.swingStart.toFixed(4),
       sl:Math.round(me.swordLen), xp:me.xp, xpn:me.xpNext
     });
   }
 }
 
-// ── 상대 검 애니메이션 ──
+// ── 상대 보간 업데이트 ──
 function updateOp(){
+  // 위치 보간 (lerp) - 부드럽게 따라가기
+  if(op.tx!==undefined){
+    op.x=op.x+(op.tx-op.x)*0.3;
+    op.y=op.y+(op.ty-op.y)*0.3;
+  }
   if(op.swinging){
     op.swingT=(op.swingT||0)+1;
     op.swordAngle=op.swingStart+(op.swingT/SWING_DUR)*SWING_ARC;
