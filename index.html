@@ -120,13 +120,16 @@ const SUPA_URL='https://dbhyycsjnqwowdwzhqgk.supabase.co';
 const SUPA_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRiaHl5Y3NqbnF3b3dkd3pocWdrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA4MTM0ODgsImV4cCI6MjA5NjM4OTQ4OH0.oqeI0DlceqW9bsSL7u1RMQ8jZyYlEZQoSOTS6QGYFeU';
 const sb=supabase.createClient(SUPA_URL,SUPA_KEY);
 
-// ── 상수 ──
+// ── 상수 (모두 시간 기반 — 프레임레이트 무관) ──
 const MAP_W=2400,MAP_H=2400,TILE=80;
-const BASE_SPEED=3.8,SWING_DUR=20,SWING_ARC=Math.PI*1.15,BASE_DMG=22;
+const BASE_SPEED=220;          // px/초
+const SWING_DUR_MS=350;        // 스윙 지속 ms
+const SWING_ARC=Math.PI*1.15;
+const BASE_DMG=22;
 const MAX_SWORD=240,SWORD_BASE=60,XP_PER_SWORD=30,SWORD_GROW=20;
-const SKILL_THRESHOLDS=[70,180,330]; // XP 도달 시 스킬 선택
-const DASH_DIST=160,DASH_CD=120; // 대쉬 거리/쿨다운(프레임)
-const REGEN_RATE=2; // 초당 체력 회복
+const SKILL_THRESHOLDS=[70,180,330];
+const DASH_DIST=160,DASH_CD_MS=2000; // 대쉬 쿨다운 ms
+const REGEN_INTERVAL_MS=1000;         // 재생 간격 ms
 
 // ── 스킬 정의 ──
 const SKILL_DEFS={
@@ -141,11 +144,12 @@ const SKILL_DEFS={
 let ch=null,myRole=null,roomCode='',gameRunning=false,gameOver=false;
 let me={},op={},orbs=[],projectiles=[];
 let particles=[],cam={x:0,y:0};
-let swingCD=0,clicking=false,dashCD=0;
+let swingCDms=0,clicking=false,dashCDms=0;
 const keys={},prevKeys={};
 let mx=0,my=0,lastPosSent=0,frameCount=0;
 let opBuf=[];
 let choosingSkill=false;
+let lastFrameTime=0; // 델타타임용
 
 const canvas=document.getElementById('c'),ctx=canvas.getContext('2d');
 const mm=document.getElementById('minimap'),mctx=mm.getContext('2d');
@@ -204,10 +208,10 @@ function joinRoom(){
 function mkPlayer(x,y,color){
   return{
     x,y,hp:100,maxHp:100,totalXp:0,swordLen:SWORD_BASE,
-    swordAngle:0,swinging:false,swingT:0,swingStart:0,
+    swordAngle:0,swinging:false,swingElapsed:0,swingStart:0,
     dead:false,color,hitThisSwing:false,prevX:x,prevY:y,
     speed:BASE_SPEED,dmgReduction:0,hasRegen:false,hasDash:false,hasBlade:false,
-    skills:[],nextSkillIdx:0
+    regenTimer:0,skills:[],nextSkillIdx:0
   };
 }
 function mkOrbs(n=30){
@@ -357,29 +361,29 @@ canvas.addEventListener('mouseup',e=>{if(e.button===0)clicking=false;});
 canvas.addEventListener('contextmenu',e=>e.preventDefault());
 
 function tryDash(){
-  if(!gameRunning||!me.hasDash||dashCD>0||me.dead||choosingSkill)return;
+  if(!gameRunning||!me.hasDash||dashCDms>0||me.dead||choosingSkill)return;
   const ang=me.aimAngle||0;
   me.x=Math.max(20,Math.min(MAP_W-20,me.x+Math.cos(ang)*DASH_DIST));
   me.y=Math.max(20,Math.min(MAP_H-20,me.y+Math.sin(ang)*DASH_DIST));
-  dashCD=DASH_CD;
+  dashCDms=DASH_CD_MS;
   spawnP(me.x,me.y,me.color,10);
 }
 
-// ── 내 캐릭터 업데이트 ──
-let regenTick=0;
-function updateMe(){
+// ── 내 캐릭터 업데이트 (델타타임 기반) ──
+function updateMe(dt){
   if(!gameRunning||me.dead||gameOver)return;
 
-  // 재생
+  // 재생 (ms 기반)
   if(me.hasRegen){
-    regenTick++;
-    if(regenTick>=60){regenTick=0;me.hp=Math.min(me.maxHp,me.hp+REGEN_RATE);}
+    me.regenTimer=(me.regenTimer||0)+dt*1000;
+    if(me.regenTimer>=REGEN_INTERVAL_MS){me.regenTimer=0;me.hp=Math.min(me.maxHp,me.hp+2);}
   }
 
-  // 대쉬 쿨다운
-  if(dashCD>0)dashCD--;
+  // 쿨다운 (ms 기반)
+  if(dashCDms>0)dashCDms=Math.max(0,dashCDms-dt*1000);
+  if(swingCDms>0)swingCDms=Math.max(0,swingCDms-dt*1000);
 
-  // 이동
+  // 이동 (px/초 * dt초)
   if(!choosingSkill){
     me.prevX=me.x;me.prevY=me.y;
     let dx=0,dy=0;
@@ -388,30 +392,33 @@ function updateMe(){
     if(keys['a']||keys['arrowleft'])dx-=1;
     if(keys['d']||keys['arrowright'])dx+=1;
     if(dx&&dy){dx*=0.707;dy*=0.707;}
-    me.x=Math.max(20,Math.min(MAP_W-20,me.x+dx*me.speed));
-    me.y=Math.max(20,Math.min(MAP_H-20,me.y+dy*me.speed));
+    me.x=Math.max(20,Math.min(MAP_W-20,me.x+dx*me.speed*dt));
+    me.y=Math.max(20,Math.min(MAP_H-20,me.y+dy*me.speed*dt));
   }
 
   me.aimAngle=Math.atan2(my+cam.y-me.y,mx+cam.x-me.x)||0;
 
-  // 스윙
-  if(!choosingSkill&&clicking&&!me.swinging&&swingCD<=0){
-    me.swinging=true;me.swingT=0;
+  // 스윙 시작
+  if(!choosingSkill&&clicking&&!me.swinging&&swingCDms<=0){
+    me.swinging=true;me.swingElapsed=0;
     me.swingStart=me.aimAngle-SWING_ARC/2;
-    me.hitThisSwing=false;swingCD=30;
+    me.hitThisSwing=false;
+    swingCDms=SWING_DUR_MS+100; // 스윙 시간 + 100ms 쿨
     // 검기 발사
     if(me.hasBlade){
-      const vx=Math.cos(me.aimAngle)*8,vy=Math.sin(me.aimAngle)*8;
+      const spd=480; // px/초
+      const vx=Math.cos(me.aimAngle)*spd,vy=Math.sin(me.aimAngle)*spd;
       const pid=Date.now()%1000000;
-      projectiles.push({x:me.x,y:me.y,vx,vy,color:me.color,life:60,fromOp:false,id:pid});
-      send('proj',{x:Math.round(me.x),y:Math.round(me.y),vx:+vx.toFixed(2),vy:+vy.toFixed(2),id:pid});
+      projectiles.push({x:me.x,y:me.y,vx,vy,color:me.color,life:1.2,fromOp:false,id:pid});
+      send('proj',{x:Math.round(me.x),y:Math.round(me.y),vx:+vx.toFixed(1),vy:+vy.toFixed(1),id:pid});
     }
   }
-  if(swingCD>0)swingCD--;
+  // 스윙 진행 (ms 기반)
   if(me.swinging){
-    me.swingT++;
-    me.swordAngle=me.swingStart+(me.swingT/SWING_DUR)*SWING_ARC;
-    if(me.swingT>=SWING_DUR){me.swinging=false;me.hitThisSwing=false;}
+    me.swingElapsed=(me.swingElapsed||0)+dt*1000;
+    const t=Math.min(1,me.swingElapsed/SWING_DUR_MS);
+    me.swordAngle=me.swingStart+t*SWING_ARC;
+    if(me.swingElapsed>=SWING_DUR_MS){me.swinging=false;me.hitThisSwing=false;}
   }else{
     me.swordAngle=me.aimAngle;
   }
@@ -421,10 +428,8 @@ function updateMe(){
     const o=orbs[i];if(!o.alive)continue;
     if(Math.hypot(me.x-o.x,me.y-o.y)<20+o.r){
       o.alive=false;
-      const prevXp=me.totalXp;
       me.totalXp+=o.value;
       me.swordLen=Math.min(MAX_SWORD,SWORD_BASE+Math.floor(me.totalXp/XP_PER_SWORD)*SWORD_GROW);
-      // 스킬 임계값 확인
       if(me.nextSkillIdx<SKILL_THRESHOLDS.length&&me.totalXp>=SKILL_THRESHOLDS[me.nextSkillIdx]){
         showSkillChoice();
       }
@@ -439,33 +444,27 @@ function updateMe(){
   // 죽은 구슬 정리 (150프레임마다)
   if(frameCount%150===0)orbs=orbs.filter(o=>o.alive);
 
-  // 검 타격 판정 - 검 전체 길이를 여러 점으로 체크해 판정 누락 방지
+  // 검 타격 판정 (검 전체 5점 체크)
   if(me.swinging&&!me.hitThisSwing&&!op.dead&&op.x){
-    const ang=me.swordAngle;
-    const sl=me.swordLen;
-    let hit=false;
-    // 검 시작~끝까지 5점 체크
+    const ang=me.swordAngle,sl=me.swordLen;
     for(let k=0;k<=5;k++){
-      const ratio=k/5;
-      const checkX=me.x+Math.cos(ang)*(16+sl*ratio);
-      const checkY=me.y+Math.sin(ang)*(16+sl*ratio);
-      // op.x/y = 판정용 실제 위치 (지연 없음), 히트박스 28px
-      if(Math.hypot(checkX-op.x,checkY-op.y)<28){hit=true;break;}
-    }
-    if(hit){
-      me.hitThisSwing=true;
-      op.hp=Math.max(0,op.hp-BASE_DMG);
-      spawnP(op.rx||op.x,op.ry||op.y,'#e94560',12);
-      send('hit',{d:BASE_DMG});
-      if(op.hp<=0){op.dead=true;send('dead',{});endGame(true);}
+      const r=k/5;
+      if(Math.hypot(me.x+Math.cos(ang)*(16+sl*r)-op.x, me.y+Math.sin(ang)*(16+sl*r)-op.y)<28){
+        me.hitThisSwing=true;
+        op.hp=Math.max(0,op.hp-BASE_DMG);
+        spawnP(op.rx||op.x,op.ry||op.y,'#e94560',12);
+        send('hit',{d:BASE_DMG});
+        if(op.hp<=0){op.dead=true;send('dead',{});endGame(true);}
+        break;
+      }
     }
   }
 
-  // 검기 충돌
+  // 검기 이동 및 충돌 (dt 기반)
   for(let i=projectiles.length-1;i>=0;i--){
     const proj=projectiles[i];
     if(proj.fromOp)continue;
-    proj.x+=proj.vx;proj.y+=proj.vy;proj.life--;
+    proj.x+=proj.vx*dt;proj.y+=proj.vy*dt;proj.life-=dt;
     if(proj.life<=0){projectiles.splice(i,1);continue;}
     if(op.x&&Math.hypot(proj.x-op.x,proj.y-op.y)<22){
       op.hp=Math.max(0,op.hp-12);
@@ -483,21 +482,20 @@ function updateMe(){
     send('pos',{x:Math.round(me.x),y:Math.round(me.y),sa:+me.swordAngle.toFixed(3),sw:me.swinging,ss:+me.swingStart.toFixed(3),sl:Math.round(me.swordLen),xp:me.totalXp});
   }
 }
-
 // ── 상대 업데이트 (보간 버퍼) ──
-function updateOp(){
-  orbs.forEach(o=>{if(o.alive)o.pulse+=0.07;});
+function updateOp(dt){
+  orbs.forEach(o=>{if(o.alive)o.pulse+=dt*4;});
 
-  // 상대 검기 업데이트
+  // 상대 검기 (dt 기반)
   for(let i=projectiles.length-1;i>=0;i--){
     const proj=projectiles[i];
     if(!proj.fromOp)continue;
-    proj.x+=proj.vx;proj.y+=proj.vy;proj.life--;
+    proj.x+=proj.vx*dt;proj.y+=proj.vy*dt;proj.life-=dt;
     if(proj.life<=0)projectiles.splice(i,1);
   }
 
   if(opBuf.length<2){
-    if(opBuf.length===1){op.x=opBuf[0].x;op.y=opBuf[0].y;}
+    if(opBuf.length===1){op.rx=opBuf[0].x;op.ry=opBuf[0].y;}
     return;
   }
   const renderTime=Date.now()-100;
@@ -507,20 +505,22 @@ function updateOp(){
   }
   if(!prev){
     const last=opBuf[opBuf.length-1];
-    op.rx=last.x; op.ry=last.y; // 렌더링 위치
+    op.rx=last.x;op.ry=last.y;
     op.swordAngle=last.sa||0;
-    if(last.sw&&!op.swinging){op.swinging=true;op.swingT=0;op.swingStart=last.ss||0;}
+    if(last.sw&&!op.swinging){op.swinging=true;op.swingElapsed=0;op.swingStart=last.ss||0;}
     return;
   }
   const t=prev.ts===next.ts?1:(renderTime-prev.ts)/(next.ts-prev.ts);
-  op.rx=prev.x+(next.x-prev.x)*t; // 렌더링만 보간
+  op.rx=prev.x+(next.x-prev.x)*t;
   op.ry=prev.y+(next.y-prev.y)*t;
   op.swordAngle=(prev.sa||0)+((next.sa||0)-(prev.sa||0))*t;
-  if(next.sw&&!op.swinging){op.swinging=true;op.swingT=0;op.swingStart=next.ss||0;}
+  if(next.sw&&!op.swinging){op.swinging=true;op.swingElapsed=0;op.swingStart=next.ss||0;}
+  // 상대 스윙 애니메이션 (dt 기반)
   if(op.swinging){
-    op.swingT=(op.swingT||0)+1;
-    op.swordAngle=op.swingStart+(op.swingT/SWING_DUR)*SWING_ARC;
-    if(op.swingT>=SWING_DUR){op.swinging=false;op.swingT=0;}
+    op.swingElapsed=(op.swingElapsed||0)+dt*1000;
+    const st2=Math.min(1,op.swingElapsed/SWING_DUR_MS);
+    op.swordAngle=op.swingStart+st2*SWING_ARC;
+    if(op.swingElapsed>=SWING_DUR_MS){op.swinging=false;op.swingElapsed=0;}
   }
 }
 
@@ -617,9 +617,9 @@ function drawPlayer(p,isMe){
     ctx.font='10px monospace';ctx.textAlign='center';ctx.textBaseline='bottom';
     ctx.fillText(isMe?'나':'상대',sx,sy-32);
     // 대쉬 쿨다운 표시
-    if(isMe&&p.hasDash&&dashCD>0){
+    if(isMe&&p.hasDash&&dashCDms>0){
       ctx.fillStyle='#e9456088';ctx.font='9px monospace';
-      ctx.fillText('E:'+(dashCD/60).toFixed(1)+'s',sx,sy-42);
+      ctx.fillText('E:'+(dashCDms/1000).toFixed(1)+'s',sx,sy-42);
     }
   }
   ctx.globalAlpha=1;
@@ -670,11 +670,14 @@ function updateHUD(){
 }
 
 // ── 메인 루프 ──
-function loop(){
+function loop(timestamp){
   requestAnimationFrame(loop);
   if(!gameRunning)return;
+  // 델타타임 계산 (초 단위, 최대 100ms 캡)
+  const dt=Math.min((timestamp-(lastFrameTime||timestamp))/1000, 0.1);
+  lastFrameTime=timestamp;
   frameCount++;
-  updateMe();updateOp();
+  updateMe(dt);updateOp(dt);
   if(me.x){
     cam.x=Math.max(0,Math.min(MAP_W-canvas.width,me.x-canvas.width/2));
     cam.y=Math.max(0,Math.min(MAP_H-canvas.height,me.y-canvas.height/2));
@@ -704,7 +707,7 @@ function backToLobby(){
   gameRunning=false;gameOver=false;choosingSkill=false;
   if(ch){sb.removeChannel(ch);ch=null;}
   me={};op={};orbs=[];particles=[];opBuf=[];projectiles=[];
-  swingCD=0;dashCD=0;frameCount=0;regenTick=0;myRole=null;
+  swingCDms=0;dashCDms=0;frameCount=0;lastFrameTime=0;myRole=null;
   document.getElementById('overlay').style.display='none';
   document.getElementById('skillOverlay').style.display='none';
   document.getElementById('gameContainer').style.display='none';
