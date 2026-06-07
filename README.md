@@ -1,1 +1,1 @@
-[# SWORD](https://k0yomi.github.io/SWORD/)
+(https://k0yomi.github.io/SWORD/)
