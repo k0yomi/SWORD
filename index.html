@@ -33,7 +33,6 @@ canvas{display:block;}
 .hud-row{display:flex;align-items:center;gap:8px;margin-bottom:4px;font-size:.72rem;color:#667;}
 .hud-bar{flex:1;height:5px;background:#111;border-radius:3px;overflow:hidden;}
 .hud-fill{height:100%;border-radius:3px;transition:width .2s;}
-#ch{font-size:.72rem;color:#445;text-align:center;padding-top:4px;}
 #overlay{position:fixed;inset:0;background:rgba(0,0,0,.82);display:none;align-items:center;justify-content:center;z-index:200;}
 #ovBox{text-align:center;background:rgba(10,15,40,.99);border:1px solid #1a3060;border-radius:16px;padding:2.5rem 2rem;width:300px;}
 #ovBox h2{font-family:'Orbitron',sans-serif;font-size:1.8rem;margin-bottom:.5rem;}
@@ -67,7 +66,7 @@ canvas{display:block;}
       <div class="hud-row">XP <span id="h1xp">0</span>/<span id="h1xpn">100</span><div class="hud-bar"><div class="hud-fill" id="h1xpf" style="width:0%;background:#f0c040"></div></div></div>
       <div class="hud-row" style="color:#4ecca3aa">검 <span id="h1sw">60</span>px</div>
     </div>
-    <div id="ch">🌐 연결됨</div>
+    <div style="font-size:.72rem;color:#445;text-align:center;padding-top:4px;" id="ch">🌐 연결됨</div>
     <div class="phud po" style="text-align:right">
       <div class="hud-name" style="color:#e94560">◀ 상대</div>
       <div class="hud-row">HP <span id="h2hp">100</span><div class="hud-bar"><div class="hud-fill" id="h2hpf" style="width:100%;background:#e94560"></div></div></div>
@@ -87,15 +86,16 @@ canvas{display:block;}
 
 <script>
 // ══════════════════════════════════════════
-// MQTT over WebSocket (no library needed)
-// Server: broker.emqx.io:8084 (free, public)
+//  Minimal MQTT over WebSocket
 // ══════════════════════════════════════════
 class MQTT {
-  constructor(){ this.ws=null; this.onmsg=null; this._buf=null; }
+  constructor(){ this.ws=null; this.onmsg=null; this.onclose=null; }
 
   encLen(n){
     if(n<128) return [n];
-    return [n&0x7f|0x80, n>>7];
+    const r=[];
+    while(n>0){ let b=n&0x7f; n>>=7; if(n>0)b|=0x80; r.push(b); }
+    return r;
   }
 
   strBytes(s){
@@ -105,158 +105,203 @@ class MQTT {
 
   connect(url, clientId){
     return new Promise((res,rej)=>{
-      this.ws = new WebSocket(url, ['mqtt']);
+      this.ws=new WebSocket(url,['mqtt']);
       this.ws.binaryType='arraybuffer';
-      this.ws.onopen = ()=>{
-        // CONNECT packet
-        const proto=[0,4,77,81,84,84,4,0,0,60]; // MQTT v3.1.1, clean session, keepalive=60
+      this.ws.onopen=()=>{
+        const proto=[0,4,77,81,84,84,4,2,0,60]; // MQTT 3.1.1, clean session
         const cid=this.strBytes(clientId);
         const rem=[...proto,...cid];
-        const pkt=[0x10,...this.encLen(rem.length),...rem];
-        this.ws.send(new Uint8Array(pkt));
+        this.ws.send(new Uint8Array([0x10,...this.encLen(rem.length),...rem]));
       };
+      let opened=false;
       this.ws.onmessage=(e)=>{
         const b=new Uint8Array(e.data);
         const type=b[0]>>4;
-        if(type===2) res(); // CONNACK
-        else if(type===3) this._onPublish(b); // PUBLISH
+        if(type===2&&!opened){ opened=true; res(); }
+        else if(type===3) this._onPub(b);
       };
-      this.ws.onerror=()=>rej(new Error('ws error'));
+      this.ws.onerror=()=>rej(new Error('mqtt error'));
       this.ws.onclose=()=>{ if(this.onclose)this.onclose(); };
+      setTimeout(()=>{ if(!opened)rej(new Error('timeout')); },8000);
     });
   }
 
   subscribe(topic){
     const t=this.strBytes(topic);
-    const rem=[0,1,...t,0]; // packet ID=1, QoS=0
-    const pkt=[0x82,...this.encLen(rem.length),...rem];
-    this.ws.send(new Uint8Array(pkt));
+    const rem=[0,1,...t,0];
+    this.ws.send(new Uint8Array([0x82,...this.encLen(rem.length),...rem]));
   }
 
-  publish(topic,msg){
+  publish(topic, msg){
     const t=this.strBytes(topic);
     const m=new TextEncoder().encode(msg);
     const rem=[...t,...m];
-    const pkt=[0x30,...this.encLen(rem.length),...rem];
-    this.ws.send(new Uint8Array(pkt));
+    this.ws.send(new Uint8Array([0x30,...this.encLen(rem.length),...rem]));
   }
 
-  _onPublish(b){
-    let i=1;
-    // skip remaining length bytes
-    while(b[i]&0x80)i++;
-    i++;
-    const tLen=(b[i]<<8)|b[i+1]; i+=2;
-    i+=tLen; // skip topic (we only use one topic)
+  _onPub(b){
+    // skip fixed header + remaining length
+    let i=1; while(b[i]&0x80)i++; i++;
+    // topic length
+    const tLen=(b[i]<<8)|b[i+1]; i+=2+tLen;
     const payload=new TextDecoder().decode(b.slice(i));
     if(this.onmsg) this.onmsg(payload);
   }
 
-  disconnect(){
-    if(this.ws){try{this.ws.close();}catch(e){}}
-    this.ws=null;
-  }
+  disconnect(){ if(this.ws){try{this.ws.close();}catch(e){}} this.ws=null; }
 }
 
-// ── State ──
-const mqtt = new MQTT();
-let myRole=null, roomCode='', gameRunning=false;
-let topic='';
+// ══════════════════════════════════════════
+//  Game globals
+// ══════════════════════════════════════════
+const MAP_W=2400, MAP_H=2400, TILE=80;
+const SPEED=3.8, SWING_DUR=20, SWING_ARC=Math.PI*1.15, DMG=22;
 
-function randCode(){
-  const c='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  let s='';for(let i=0;i<6;i++)s+=c[Math.floor(Math.random()*c.length)];
-  return s;
-}
+const mqtt=new MQTT();
+let myRole=null, roomCode='', topic='', gameRunning=false;
 
-function send(type,payload={}){
-  if(!mqtt.ws||mqtt.ws.readyState!==1)return;
-  mqtt.publish(topic, JSON.stringify({type,payload,from:myRole}));
-}
-
-// ── Game constants ──
-const MAP_W=2400,MAP_H=2400,TILE=80;
-const SPEED=3.8,SWING_DUR=20,SWING_ARC=Math.PI*1.15,DMG=22;
-let gs=null,particles=[],cam={x:0,y:0};
-let swingCD=0,lastStr='',clicking=false;
+// 각 플레이어가 자신의 캐릭터를 로컬에서 직접 제어
+let me={}, op={};   // me = 내 캐릭터, op = 상대 캐릭터
+let orbs=[];
+let particles=[], cam={x:0,y:0};
+let swingCD=0, clicking=false;
 const keys={};
-let mx=0,my=0;
+let mx=0, my=0;
+let lastPosSent=0;
+let gameOver=false;
 
-const canvas=document.getElementById('c'),ctx=canvas.getContext('2d');
-const mm=document.getElementById('minimap'),mctx=mm.getContext('2d');
-function resize(){canvas.width=window.innerWidth;canvas.height=window.innerHeight;}
-resize();window.addEventListener('resize',resize);
+const canvas=document.getElementById('c'), ctx=canvas.getContext('2d');
+const mm=document.getElementById('minimap'), mctx=mm.getContext('2d');
+function resize(){ canvas.width=window.innerWidth; canvas.height=window.innerHeight; }
+resize(); window.addEventListener('resize',resize);
 
 // ── UI ──
-function st(msg,c='#4ecca3'){const e=document.getElementById('status');e.style.color=c;e.innerHTML=msg;}
-function setBtns(d){document.getElementById('hBtn').disabled=d;document.getElementById('jBtn').disabled=d;}
+function st(msg,c='#4ecca3'){ const e=document.getElementById('status'); e.style.color=c; e.innerHTML=msg; }
+function setBtns(d){ document.getElementById('hBtn').disabled=d; document.getElementById('jBtn').disabled=d; }
 function copyCode(){
   navigator.clipboard.writeText(roomCode).catch(()=>{});
   document.getElementById('codeHint').textContent='✅ 복사됨!';
   setTimeout(()=>document.getElementById('codeHint').textContent='클릭하면 복사',1500);
 }
+function randCode(){
+  const c='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let s=''; for(let i=0;i<6;i++) s+=c[Math.floor(Math.random()*c.length)];
+  return s;
+}
 
-async function connectMQTT(){
+// ── MQTT send ──
+function send(type, payload){
+  if(!mqtt.ws||mqtt.ws.readyState!==1) return;
+  mqtt.publish(topic, JSON.stringify({t:type, p:payload, r:myRole}));
+}
+
+async function connectMQTT(code){
+  topic='swd/'+code;
   const cid='sd_'+(Math.random().toString(36).substring(2,10));
   await mqtt.connect('wss://broker.emqx.io:8084/mqtt', cid);
   mqtt.subscribe(topic);
   mqtt.onmsg=(raw)=>{
-    try{ handleMsg(JSON.parse(raw)); }catch(e){}
+    try{ const m=JSON.parse(raw); if(m.r!==myRole) handleMsg(m); }catch(e){}
   };
-  mqtt.onclose=()=>{
-    if(gameRunning) document.getElementById('ch').textContent='⚠️ 연결 끊김';
-  };
+}
+
+// ── Player factory ──
+function mkPlayer(x,y,color){
+  return { x, y, hp:100, maxHp:100, xp:0, xpNext:100, swordLen:60,
+           swordAngle:0, swinging:false, swingT:0, swingStart:0,
+           dead:false, color, hitThisSwing:false };
+}
+
+// ── Orbs ──
+function mkOrbs(n=35){
+  const arr=[];
+  for(let i=0;i<n;i++) arr.push({
+    x:120+Math.random()*(MAP_W-240), y:120+Math.random()*(MAP_H-240),
+    r:7, value:10+Math.floor(Math.random()*25), alive:true, pulse:Math.random()*Math.PI*2, id:i
+  });
+  return arr;
 }
 
 // ── Lobby ──
 async function hostRoom(){
-  setBtns(true);
-  roomCode=randCode();
-  topic='swordduel/'+roomCode;
-  myRole='host';
+  setBtns(true); roomCode=randCode(); myRole='host';
   st('서버 연결 중...');
   try{
-    await connectMQTT();
+    await connectMQTT(roomCode);
     const box=document.getElementById('codeBox');
     box.style.display='block'; box.textContent=roomCode;
     document.getElementById('codeHint').textContent='클릭하면 복사';
-    st('✅ 연결됨! 친구에게 <b style="color:#4ecca3;letter-spacing:4px">'+roomCode+'</b> 코드를 보내주세요.');
-  }catch(e){
-    st('❌ 서버 연결 실패. 새로고침 해주세요.','#e94560');
-    setBtns(false);
-  }
+    st('✅ 준비됨! 친구에게 <b style="color:#4ecca3;letter-spacing:4px">'+roomCode+'</b> 코드를 보내주세요.');
+    mqtt.onclose=()=>{ if(gameRunning) document.getElementById('ch').textContent='⚠️연결끊김'; };
+  }catch(e){ st('❌ 연결 실패. 새로고침 해주세요.','#e94560'); setBtns(false); }
 }
 
 async function joinRoom(){
   const code=document.getElementById('codeIn').value.trim().toUpperCase();
-  if(code.length!==6){st('6자리 코드를 입력하세요','#e94560');return;}
+  if(code.length!==6){ st('6자리 코드를 입력하세요','#e94560'); return; }
   roomCode=code; myRole='guest';
-  topic='swordduel/'+code;
-  setBtns(true);
-  st('서버 연결 중...');
+  setBtns(true); st('서버 연결 중...');
   try{
-    await connectMQTT();
-    st('✅ 연결됨! 참가 신호 전송 중...');
+    await connectMQTT(code);
+    st('✅ 연결됨! 호스트 응답 대기 중...');
     send('join');
-    setTimeout(()=>{if(!gameRunning){st('⚠️ 응답 없음. 호스트가 먼저 방을 만들어야 합니다.','#e94560');setBtns(false);}},12000);
-  }catch(e){
-    st('❌ 서버 연결 실패. 새로고침 해주세요.','#e94560');
-    setBtns(false);
-  }
+    setTimeout(()=>{ if(!gameRunning){ st('⚠️ 응답 없음. 호스트가 먼저 방을 만들어야 합니다.','#e94560'); setBtns(false); }},12000);
+  }catch(e){ st('❌ 연결 실패. 새로고침 해주세요.','#e94560'); setBtns(false); }
 }
 
-// ── Game state ──
-function mkP(x,y,color){
-  return{x,y,hp:100,maxHp:100,xp:0,xpNext:100,swordLen:60,swordAngle:0,
-    swinging:false,swingT:0,swingStart:0,dead:false,color,hitThisSwing:false};
-}
-function mkOrbs(n=35){
-  const o=[];
-  for(let i=0;i<n;i++) o.push({x:120+Math.random()*(MAP_W-240),y:120+Math.random()*(MAP_H-240),r:7,value:10+Math.floor(Math.random()*25),alive:true,pulse:Math.random()*Math.PI*2});
-  return o;
-}
-function initGS(){
-  gs={host:mkP(200,200,'#4ecca3'),guest:mkP(MAP_W-200,MAP_H-200,'#e94560'),orbs:mkOrbs(35),tick:0,over:false,winner:null};
+// ── Message handler ──
+function handleMsg(m){
+  const {t,p}=m;
+
+  // 호스트: 게스트가 참가하면 게임 초기화 후 시작 신호
+  if(t==='join' && myRole==='host'){
+    orbs=mkOrbs(35);
+    me=mkPlayer(200,200,'#4ecca3');
+    op=mkPlayer(MAP_W-200,MAP_H-200,'#e94560');
+    send('start',{ orbs: orbs.map(o=>({x:Math.round(o.x),y:Math.round(o.y),r:o.r,value:o.value,id:o.id})) });
+    startGame();
+  }
+
+  // 게스트: 호스트가 시작 신호 보내면 같은 오브 배치로 게임 시작
+  if(t==='start' && myRole==='guest'){
+    orbs=p.orbs.map(o=>({...o,alive:true,pulse:Math.random()*Math.PI*2}));
+    me=mkPlayer(MAP_W-200,MAP_H-200,'#e94560');
+    op=mkPlayer(200,200,'#4ecca3');
+    startGame();
+  }
+
+  // 상대 위치/상태 업데이트
+  if(t==='pos'){
+    op.x=p.x; op.y=p.y;
+    op.swordAngle=p.sa;
+    op.swinging=p.sw;
+    op.swingStart=p.ss;
+    op.swordLen=p.sl;
+    op.xp=p.xp; op.xpNext=p.xpn;
+  }
+
+  // 상대가 구슬 먹었을 때
+  if(t==='orb'){
+    const o=orbs.find(o=>o.id===p.id);
+    if(o) o.alive=false;
+    // 새 구슬 추가 (같은 seed로)
+    if(p.newOrb){
+      orbs.push({x:p.newOrb.x,y:p.newOrb.y,r:7,value:p.newOrb.v,alive:true,pulse:Math.random()*Math.PI*2,id:p.newOrb.id});
+    }
+  }
+
+  // 내가 피격당했을 때
+  if(t==='hit'){
+    me.hp=Math.max(0,me.hp-p.dmg);
+    spawnP(me.x,me.y,'#e94560',12);
+    if(me.hp<=0){ me.dead=true; endGame(false); }
+  }
+
+  // 상대 사망 확인
+  if(t==='dead'){
+    op.dead=true;
+    endGame(true);
+  }
 }
 
 // ── Input ──
@@ -264,16 +309,17 @@ window.addEventListener('keydown',e=>{
   keys[e.key.toLowerCase()]=true;
   if(['arrowup','arrowdown','arrowleft','arrowright',' '].includes(e.key.toLowerCase()))e.preventDefault();
 });
-window.addEventListener('keyup',e=>{keys[e.key.toLowerCase()]=false;});
-canvas.addEventListener('mousemove',e=>{mx=e.clientX;my=e.clientY;});
-canvas.addEventListener('mousedown',e=>{if(e.button===0)clicking=true;});
-canvas.addEventListener('mouseup',e=>{if(e.button===0)clicking=false;});
+window.addEventListener('keyup',e=>{ keys[e.key.toLowerCase()]=false; });
+canvas.addEventListener('mousemove',e=>{ mx=e.clientX; my=e.clientY; });
+canvas.addEventListener('mousedown',e=>{ if(e.button===0)clicking=true; });
+canvas.addEventListener('mouseup',e=>{ if(e.button===0)clicking=false; });
 canvas.addEventListener('contextmenu',e=>e.preventDefault());
 
-function processInput(){
-  if(!gs||gs.over)return;
-  const me=myRole==='host'?gs.host:gs.guest;
-  if(me.dead)return;
+// ── 내 캐릭터 업데이트 (로컬) ──
+function updateMe(){
+  if(!gameRunning||me.dead||gameOver) return;
+
+  // 이동
   let dx=0,dy=0;
   if(keys['w']||keys['arrowup'])dy-=1;
   if(keys['s']||keys['arrowdown'])dy+=1;
@@ -282,262 +328,236 @@ function processInput(){
   if(dx&&dy){dx*=0.707;dy*=0.707;}
   me.x=Math.max(20,Math.min(MAP_W-20,me.x+dx*SPEED));
   me.y=Math.max(20,Math.min(MAP_H-20,me.y+dy*SPEED));
-  me.aimAngle=Math.atan2(my+cam.y-me.y,mx+cam.x-me.x);
+
+  // 조준
+  me.aimAngle=Math.atan2(my+cam.y-me.y, mx+cam.x-me.x);
+
+  // 검 휘두르기
   if(clicking&&!me.swinging&&swingCD<=0){
-    me.swinging=true;me.swingT=0;
+    me.swinging=true; me.swingT=0;
     me.swingStart=me.aimAngle-SWING_ARC/2;
-    me.hitThisSwing=false;swingCD=30;
+    me.hitThisSwing=false; swingCD=30;
   }
-  if(swingCD>0)swingCD--;
-  const s=`${Math.round(me.x)},${Math.round(me.y)},${me.aimAngle?.toFixed(3)},${me.swinging},${me.swingStart?.toFixed(3)}`;
-  if(s!==lastStr){
-    send('input',{x:me.x,y:me.y,aimAngle:me.aimAngle,swinging:me.swinging,swingStart:me.swingStart});
-    lastStr=s;
+  if(swingCD>0) swingCD--;
+
+  // 검 각도 업데이트
+  if(me.swinging){
+    me.swingT++;
+    me.swordAngle=me.swingStart+(me.swingT/SWING_DUR)*SWING_ARC;
+    if(me.swingT>=SWING_DUR){ me.swinging=false; me.hitThisSwing=false; }
+  } else {
+    me.swordAngle=me.aimAngle;
   }
-}
 
-function applyInput(role,d){
-  if(!gs)return;
-  const p=gs[role];
-  p.x=d.x;p.y=d.y;p.aimAngle=d.aimAngle;
-  if(d.swinging&&!p.swinging){p.swinging=true;p.swingT=0;p.swingStart=d.swingStart;p.hitThisSwing=false;}
-}
-
-// ── Simulation ──
-function simulate(){
-  if(!gs||gs.over)return;
-  ['host','guest'].forEach(r=>{
-    const p=gs[r];if(p.dead)return;
-    if(p.swinging){
-      p.swingT++;
-      p.swordAngle=p.swingStart+(p.swingT/SWING_DUR)*SWING_ARC;
-      if(p.swingT>=SWING_DUR){p.swinging=false;p.hitThisSwing=false;}
-    }else p.swordAngle=p.aimAngle||0;
+  // 구슬 먹기
+  orbs.forEach(o=>{
+    if(!o.alive) return;
+    if(Math.hypot(me.x-o.x, me.y-o.y)<18+o.r){
+      o.alive=false;
+      me.xp+=o.value;
+      while(me.xp>=me.xpNext){ me.xp-=me.xpNext; me.xpNext=Math.floor(me.xpNext*1.5); me.swordLen+=24; }
+      // 새 구슬 생성
+      const newOrb={ x:Math.round(120+Math.random()*(MAP_W-240)), y:Math.round(120+Math.random()*(MAP_H-240)), v:10+Math.floor(Math.random()*25), id:Date.now()+Math.floor(Math.random()*1000) };
+      orbs.push({...newOrb,r:7,alive:true,pulse:Math.random()*Math.PI*2});
+      send('orb',{ id:o.id, newOrb });
+    }
   });
-  chkHit('host','guest');chkHit('guest','host');
-  ['host','guest'].forEach(r=>{
-    const p=gs[r];if(p.dead)return;
-    gs.orbs.forEach(o=>{
-      if(!o.alive)return;
-      if(Math.hypot(p.x-o.x,p.y-o.y)<18+o.r){
-        o.alive=false;p.xp+=o.value;
-        while(p.xp>=p.xpNext){p.xp-=p.xpNext;p.xpNext=Math.floor(p.xpNext*1.5);p.swordLen+=24;}
+
+  // 상대 타격 판정 (내가 공격자)
+  if(me.swinging && !me.hitThisSwing && !op.dead){
+    const tipX=me.x+Math.cos(me.swordAngle)*me.swordLen;
+    const tipY=me.y+Math.sin(me.swordAngle)*me.swordLen;
+    if(Math.hypot(tipX-op.x, tipY-op.y)<24){
+      me.hitThisSwing=true;
+      op.hp=Math.max(0,op.hp-DMG);
+      spawnP(op.x,op.y,'#e94560',12);
+      send('hit',{ dmg:DMG });
+      if(op.hp<=0){
+        op.dead=true;
+        send('dead',{});
+        endGame(true);
       }
-    });
-  });
-  if(gs.orbs.filter(o=>o.alive).length<10)
-    for(let i=0;i<8;i++) gs.orbs.push({x:120+Math.random()*(MAP_W-240),y:120+Math.random()*(MAP_H-240),r:7,value:10+Math.floor(Math.random()*25),alive:true,pulse:Math.random()*Math.PI*2});
-  if(gs.host.dead||gs.guest.dead){gs.over=true;gs.winner=gs.host.dead?'guest':'host';}
-  gs.tick++;
-  gs.orbs.forEach(o=>{if(o.alive)o.pulse+=0.07;});
-}
+    }
+  }
 
-function chkHit(ar,dr){
-  const a=gs[ar],d=gs[dr];
-  if(!a.swinging||d.dead||a.hitThisSwing)return;
-  const tx=a.x+Math.cos(a.swordAngle)*a.swordLen;
-  const ty=a.y+Math.sin(a.swordAngle)*a.swordLen;
-  if(Math.hypot(tx-d.x,ty-d.y)<24){
-    d.hp=Math.max(0,d.hp-DMG);a.hitThisSwing=true;
-    spawnP(d.x,d.y,'#e94560',12);
-    if(d.hp<=0)d.dead=true;
+  // 위치 전송 (20fps)
+  const now=Date.now();
+  if(now-lastPosSent>50){
+    lastPosSent=now;
+    send('pos',{
+      x:Math.round(me.x), y:Math.round(me.y),
+      sa:me.swordAngle, sw:me.swinging, ss:me.swingStart,
+      sl:Math.round(me.swordLen), xp:me.xp, xpn:me.xpNext
+    });
   }
 }
 
-// ── Render ──
+// ── 상대 검 애니메이션 ──
+function updateOp(){
+  if(op.swinging){
+    op.swingT=(op.swingT||0)+1;
+    op.swordAngle=op.swingStart+(op.swingT/SWING_DUR)*SWING_ARC;
+    if(op.swingT>=SWING_DUR){ op.swinging=false; op.swingT=0; }
+  }
+  orbs.forEach(o=>{ if(o.alive)o.pulse+=0.07; });
+}
+
+// ── 렌더링 ──
 function spawnP(x,y,col,n=8){
   for(let i=0;i<n;i++){
-    const a=Math.random()*Math.PI*2,s=1+Math.random()*4;
+    const a=Math.random()*Math.PI*2, s=1+Math.random()*4;
     particles.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,life:40,maxLife:40,col});
   }
 }
-const tileImg=document.createElement('canvas');tileImg.width=tileImg.height=TILE;
-(()=>{const t=tileImg.getContext('2d');t.fillStyle='#0f0f1e';t.fillRect(0,0,TILE,TILE);t.strokeStyle='#141428';t.lineWidth=1;t.strokeRect(0,0,TILE,TILE);})();
+
+const tileImg=document.createElement('canvas'); tileImg.width=tileImg.height=TILE;
+(()=>{ const t=tileImg.getContext('2d'); t.fillStyle='#0f0f1e'; t.fillRect(0,0,TILE,TILE); t.strokeStyle='#141428'; t.lineWidth=1; t.strokeRect(0,0,TILE,TILE); })();
 let tilePat=null;
 
 function drawMap(){
-  const W=canvas.width,H=canvas.height;
-  if(!tilePat)tilePat=ctx.createPattern(tileImg,'repeat');
-  ctx.save();ctx.translate(-cam.x%TILE,-cam.y%TILE);
-  ctx.fillStyle=tilePat;ctx.fillRect(-TILE,-TILE,W+TILE*2,H+TILE*2);ctx.restore();
-  ctx.save();ctx.shadowColor='#e94560';ctx.shadowBlur=20;
-  ctx.strokeStyle='#e9456066';ctx.lineWidth=3;
-  ctx.strokeRect(-cam.x,-cam.y,MAP_W,MAP_H);ctx.restore();
+  const W=canvas.width, H=canvas.height;
+  if(!tilePat) tilePat=ctx.createPattern(tileImg,'repeat');
+  ctx.save(); ctx.translate(-cam.x%TILE,-cam.y%TILE);
+  ctx.fillStyle=tilePat; ctx.fillRect(-TILE,-TILE,W+TILE*2,H+TILE*2); ctx.restore();
+  ctx.save(); ctx.shadowColor='#e94560'; ctx.shadowBlur=20;
+  ctx.strokeStyle='#e9456066'; ctx.lineWidth=3;
+  ctx.strokeRect(-cam.x,-cam.y,MAP_W,MAP_H); ctx.restore();
 }
+
 function drawOrbs(){
-  const W=canvas.width,H=canvas.height;
-  gs.orbs.forEach(o=>{
-    if(!o.alive)return;
-    const sx=o.x-cam.x,sy=o.y-cam.y;
-    if(sx<-30||sx>W+30||sy<-30||sy>H+30)return;
+  const W=canvas.width, H=canvas.height;
+  orbs.forEach(o=>{
+    if(!o.alive) return;
+    const sx=o.x-cam.x, sy=o.y-cam.y;
+    if(sx<-30||sx>W+30||sy<-30||sy>H+30) return;
     const s=1+.15*Math.sin(o.pulse);
-    ctx.save();ctx.shadowColor='#f0c040';ctx.shadowBlur=12;
-    ctx.beginPath();ctx.arc(sx,sy,o.r*s,0,Math.PI*2);
-    ctx.fillStyle='#f0c040';ctx.fill();ctx.restore();
-    ctx.fillStyle='#1a1a00';ctx.font='bold 8px monospace';
-    ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.save(); ctx.shadowColor='#f0c040'; ctx.shadowBlur=12;
+    ctx.beginPath(); ctx.arc(sx,sy,o.r*s,0,Math.PI*2);
+    ctx.fillStyle='#f0c040'; ctx.fill(); ctx.restore();
+    ctx.fillStyle='#1a1a00'; ctx.font='bold 8px monospace';
+    ctx.textAlign='center'; ctx.textBaseline='middle';
     ctx.fillText('+'+o.value,sx,sy);
   });
 }
-function drawPlayer(p,isMe){
-  const sx=p.x-cam.x,sy=p.y-cam.y;
-  const W=canvas.width,H=canvas.height;
-  if(sx<-100||sx>W+100||sy<-100||sy>H+100)return;
+
+function drawPlayer(p, isMe){
+  const sx=p.x-cam.x, sy=p.y-cam.y;
+  const W=canvas.width, H=canvas.height;
+  if(sx<-100||sx>W+100||sy<-100||sy>H+100) return;
   ctx.globalAlpha=p.dead?.25:1;
-  ctx.save();ctx.shadowColor=p.color;ctx.shadowBlur=20;
-  ctx.beginPath();ctx.arc(sx,sy,16,0,Math.PI*2);ctx.fillStyle=p.color+'33';ctx.fill();ctx.restore();
-  ctx.beginPath();ctx.arc(sx,sy,14,0,Math.PI*2);ctx.fillStyle=p.color+'bb';ctx.fill();
-  ctx.strokeStyle=p.color;ctx.lineWidth=2;ctx.stroke();
-  ctx.beginPath();ctx.arc(sx,sy,5,0,Math.PI*2);ctx.fillStyle='#fff';ctx.fill();
+  ctx.save(); ctx.shadowColor=p.color; ctx.shadowBlur=20;
+  ctx.beginPath(); ctx.arc(sx,sy,16,0,Math.PI*2); ctx.fillStyle=p.color+'33'; ctx.fill(); ctx.restore();
+  ctx.beginPath(); ctx.arc(sx,sy,14,0,Math.PI*2); ctx.fillStyle=p.color+'bb'; ctx.fill();
+  ctx.strokeStyle=p.color; ctx.lineWidth=2; ctx.stroke();
+  ctx.beginPath(); ctx.arc(sx,sy,5,0,Math.PI*2); ctx.fillStyle='#fff'; ctx.fill();
   if(!p.dead){
     const ang=p.swordAngle||0;
-    const hx=sx+Math.cos(ang)*16,hy=sy+Math.sin(ang)*16;
-    const tx=sx+Math.cos(ang)*(16+p.swordLen),ty=sy+Math.sin(ang)*(16+p.swordLen);
-    ctx.save();ctx.shadowColor=p.swinging?'#fff':p.color;ctx.shadowBlur=p.swinging?20:8;
+    const hx=sx+Math.cos(ang)*16, hy=sy+Math.sin(ang)*16;
+    const tx=sx+Math.cos(ang)*(16+p.swordLen), ty=sy+Math.sin(ang)*(16+p.swordLen);
+    ctx.save(); ctx.shadowColor=p.swinging?'#fff':p.color; ctx.shadowBlur=p.swinging?20:8;
     const g=ctx.createLinearGradient(hx,hy,tx,ty);
-    g.addColorStop(0,p.color);g.addColorStop(1,p.swinging?'#fff':'#fff8');
-    ctx.beginPath();ctx.moveTo(hx,hy);ctx.lineTo(tx,ty);
-    ctx.strokeStyle=g;ctx.lineWidth=p.swinging?4:2.5;ctx.stroke();
-    if(p.swinging){ctx.beginPath();ctx.arc(tx,ty,4,0,Math.PI*2);ctx.fillStyle='#fff';ctx.fill();}
+    g.addColorStop(0,p.color); g.addColorStop(1,p.swinging?'#fff':'#fff8');
+    ctx.beginPath(); ctx.moveTo(hx,hy); ctx.lineTo(tx,ty);
+    ctx.strokeStyle=g; ctx.lineWidth=p.swinging?4:2.5; ctx.stroke();
+    if(p.swinging){ ctx.beginPath(); ctx.arc(tx,ty,4,0,Math.PI*2); ctx.fillStyle='#fff'; ctx.fill(); }
     ctx.restore();
     const bw=44;
-    ctx.fillStyle='#111a';ctx.fillRect(sx-bw/2-1,sy-30,bw+2,7);
+    ctx.fillStyle='#111a'; ctx.fillRect(sx-bw/2-1,sy-30,bw+2,7);
     ctx.fillStyle=p.hp>60?p.color:p.hp>30?'#f0c040':'#e94560';
     ctx.fillRect(sx-bw/2,sy-29,bw*(p.hp/p.maxHp),5);
     ctx.fillStyle=isMe?'#4ecca3':'#e94560';
-    ctx.font='11px monospace';ctx.textAlign='center';ctx.textBaseline='bottom';
+    ctx.font='11px monospace'; ctx.textAlign='center'; ctx.textBaseline='bottom';
     ctx.fillText(isMe?'나':'상대',sx,sy-32);
   }
   ctx.globalAlpha=1;
 }
+
 function drawParticles(){
   particles=particles.filter(p=>p.life>0);
   particles.forEach(p=>{
     ctx.globalAlpha=p.life/p.maxLife*.9;
-    ctx.beginPath();ctx.arc(p.x-cam.x,p.y-cam.y,2.5,0,Math.PI*2);
-    ctx.fillStyle=p.col;ctx.fill();
-    p.x+=p.vx;p.y+=p.vy;p.vx*=.94;p.vy*=.94;p.life--;
+    ctx.beginPath(); ctx.arc(p.x-cam.x,p.y-cam.y,2.5,0,Math.PI*2);
+    ctx.fillStyle=p.col; ctx.fill();
+    p.x+=p.vx; p.y+=p.vy; p.vx*=.94; p.vy*=.94; p.life--;
   });
   ctx.globalAlpha=1;
 }
+
 function drawMinimap(){
-  const sw=150/MAP_W,sh=150/MAP_H;
+  const sw=150/MAP_W, sh=150/MAP_H;
   mctx.clearRect(0,0,150,150);
-  mctx.fillStyle='rgba(5,8,20,.88)';mctx.fillRect(0,0,150,150);
-  mctx.strokeStyle='#1a3060';mctx.lineWidth=1;mctx.strokeRect(0,0,150,150);
-  gs.orbs.forEach(o=>{
-    if(!o.alive)return;
-    mctx.beginPath();mctx.arc(o.x*sw,o.y*sh,2,0,Math.PI*2);
-    mctx.fillStyle='#f0c04066';mctx.fill();
+  mctx.fillStyle='rgba(5,8,20,.88)'; mctx.fillRect(0,0,150,150);
+  mctx.strokeStyle='#1a3060'; mctx.lineWidth=1; mctx.strokeRect(0,0,150,150);
+  orbs.forEach(o=>{
+    if(!o.alive) return;
+    mctx.beginPath(); mctx.arc(o.x*sw,o.y*sh,2,0,Math.PI*2);
+    mctx.fillStyle='#f0c04066'; mctx.fill();
   });
-  [{p:gs.host,c:'#4ecca3'},{p:gs.guest,c:'#e94560'}].forEach(({p,c})=>{
-    mctx.beginPath();mctx.arc(p.x*sw,p.y*sh,4,0,Math.PI*2);
-    mctx.fillStyle=c;mctx.fill();
+  [{p:me,c:me.color||'#4ecca3'},{p:op,c:op.color||'#e94560'}].forEach(({p,c})=>{
+    if(!p.x) return;
+    mctx.beginPath(); mctx.arc(p.x*sw,p.y*sh,4,0,Math.PI*2);
+    mctx.fillStyle=c; mctx.fill();
   });
-  mctx.strokeStyle='#fff2';mctx.lineWidth=1;
+  mctx.strokeStyle='#fff2'; mctx.lineWidth=1;
   mctx.strokeRect(cam.x*sw,cam.y*sh,canvas.width*sw,canvas.height*sh);
 }
+
 function updateHUD(){
-  if(!gs)return;
-  const me=myRole==='host'?gs.host:gs.guest;
-  const op=myRole==='host'?gs.guest:gs.host;
-  document.getElementById('h1hp').textContent=Math.max(0,Math.round(me.hp));
-  document.getElementById('h1hpf').style.width=(me.hp/me.maxHp*100)+'%';
-  document.getElementById('h1xp').textContent=me.xp;
-  document.getElementById('h1xpn').textContent=me.xpNext;
-  document.getElementById('h1xpf').style.width=(me.xp/me.xpNext*100)+'%';
-  document.getElementById('h1sw').textContent=Math.round(me.swordLen);
-  document.getElementById('h2hp').textContent=Math.max(0,Math.round(op.hp));
-  document.getElementById('h2hpf').style.width=(op.hp/op.maxHp*100)+'%';
-  document.getElementById('h2xp').textContent=op.xp;
-  document.getElementById('h2xpn').textContent=op.xpNext;
-  document.getElementById('h2xpf').style.width=(op.xp/op.xpNext*100)+'%';
-  document.getElementById('h2sw').textContent=Math.round(op.swordLen);
+  document.getElementById('h1hp').textContent=Math.max(0,Math.round(me.hp||0));
+  document.getElementById('h1hpf').style.width=((me.hp||0)/(me.maxHp||100)*100)+'%';
+  document.getElementById('h1xp').textContent=me.xp||0;
+  document.getElementById('h1xpn').textContent=me.xpNext||100;
+  document.getElementById('h1xpf').style.width=((me.xp||0)/(me.xpNext||100)*100)+'%';
+  document.getElementById('h1sw').textContent=Math.round(me.swordLen||60);
+  document.getElementById('h2hp').textContent=Math.max(0,Math.round(op.hp||0));
+  document.getElementById('h2hpf').style.width=((op.hp||0)/(op.maxHp||100)*100)+'%';
+  document.getElementById('h2xp').textContent=op.xp||0;
+  document.getElementById('h2xpn').textContent=op.xpNext||100;
+  document.getElementById('h2xpf').style.width=((op.xp||0)/(op.xpNext||100)*100)+'%';
+  document.getElementById('h2sw').textContent=Math.round(op.swordLen||60);
 }
 
-// ── Main loop ──
-let stT=0;
+// ── 메인 루프 ──
 function loop(){
   requestAnimationFrame(loop);
-  if(!gameRunning||!gs)return;
-  processInput();
-  if(myRole==='host'){
-    simulate();
-    if(++stT>=2){
-      stT=0;
-      send('state',{
-        hx:Math.round(gs.host.x),hy:Math.round(gs.host.y),hhp:gs.host.hp,
-        hxp:gs.host.xp,hxpn:gs.host.xpNext,hsl:Math.round(gs.host.swordLen),
-        hsa:gs.host.swordAngle,hsw:gs.host.swinging,hss:gs.host.swingStart,
-        gx:Math.round(gs.guest.x),gy:Math.round(gs.guest.y),ghp:gs.guest.hp,
-        gxp:gs.guest.xp,gxpn:gs.guest.xpNext,gsl:Math.round(gs.guest.swordLen),
-        gsa:gs.guest.swordAngle,gsw:gs.guest.swinging,gss:gs.guest.swingStart,
-        orbs:gs.orbs.map(o=>o.alive?1:0),over:gs.over,winner:gs.winner
-      });
-    }
-  }
-  const me=myRole==='host'?gs.host:gs.guest;
+  if(!gameRunning) return;
+  updateMe();
+  updateOp();
   cam.x=Math.max(0,Math.min(MAP_W-canvas.width,me.x-canvas.width/2));
   cam.y=Math.max(0,Math.min(MAP_H-canvas.height,me.y-canvas.height/2));
   ctx.clearRect(0,0,canvas.width,canvas.height);
-  drawMap();drawOrbs();
-  drawPlayer(gs.host,myRole==='host');
-  drawPlayer(gs.guest,myRole==='guest');
-  drawParticles();drawMinimap();updateHUD();
-  if(gs.over&&gameRunning){
-    gameRunning=false;
-    const win=gs.winner===myRole;
-    document.getElementById('ovT').textContent=win?'🏆 승리!':'💀 패배...';
-    document.getElementById('ovT').style.color=win?'#4ecca3':'#e94560';
-    document.getElementById('ovM').textContent=win?'상대를 처치했습니다!':'쓰러졌습니다...';
-    document.getElementById('overlay').style.display='flex';
-  }
-}
-
-// ── Message handler ──
-function handleMsg(msg){
-  if(!msg||!msg.type)return;
-  if(msg.type==='join'&&myRole==='host'){
-    st('상대방 입장! 게임 시작!');
-    initGS();
-    send('start',gs);
-    setTimeout(()=>startGame(),300);
-  }
-  if(msg.type==='start'&&myRole==='guest'){gs=msg.payload;startGame();}
-  if(msg.type==='input'&&myRole==='host')applyInput(msg.from,msg.payload);
-  if(msg.type==='state'&&myRole==='guest'){
-    if(!gs)return;
-    const d=msg.payload,ph=gs.host.hp,pg=gs.guest.hp;
-    gs.host.x=d.hx;gs.host.y=d.hy;gs.host.hp=d.hhp;
-    gs.host.xp=d.hxp;gs.host.xpNext=d.hxpn;gs.host.swordLen=d.hsl;
-    gs.host.swordAngle=d.hsa;gs.host.swinging=d.hsw;gs.host.swingStart=d.hss;gs.host.dead=d.hhp<=0;
-    gs.guest.x=d.gx;gs.guest.y=d.gy;gs.guest.hp=d.ghp;
-    gs.guest.xp=d.gxp;gs.guest.xpNext=d.gxpn;gs.guest.swordLen=d.gsl;
-    gs.guest.swordAngle=d.gsa;gs.guest.swinging=d.gsw;gs.guest.swingStart=d.gss;gs.guest.dead=d.ghp<=0;
-    if(d.orbs)d.orbs.forEach((v,i)=>{if(gs.orbs[i])gs.orbs[i].alive=v===1;});
-    gs.over=d.over;gs.winner=d.winner;
-    if(gs.host.hp<ph-1)spawnP(gs.host.x,gs.host.y,'#e94560',8);
-    if(gs.guest.hp<pg-1)spawnP(gs.guest.x,gs.guest.y,'#e94560',8);
-  }
+  drawMap(); drawOrbs();
+  drawPlayer(me,true); drawPlayer(op,false);
+  drawParticles(); drawMinimap(); updateHUD();
 }
 
 function startGame(){
   document.getElementById('ui').style.display='none';
   document.getElementById('gameContainer').style.display='block';
   document.getElementById('overlay').style.display='none';
-  gameRunning=true;
+  gameRunning=true; gameOver=false;
+}
+
+function endGame(win){
+  if(gameOver) return;
+  gameOver=true; gameRunning=false;
+  document.getElementById('ovT').textContent=win?'🏆 승리!':'💀 패배...';
+  document.getElementById('ovT').style.color=win?'#4ecca3':'#e94560';
+  document.getElementById('ovM').textContent=win?'상대를 처치했습니다!':'쓰러졌습니다...';
+  document.getElementById('overlay').style.display='flex';
 }
 
 function backToLobby(){
-  gameRunning=false;gs=null;
+  gameRunning=false; gameOver=false;
+  me={}; op={}; orbs=[]; particles=[]; swingCD=0;
   mqtt.disconnect();
-  myRole=null;particles=[];swingCD=0;lastStr='';
+  myRole=null;
   document.getElementById('overlay').style.display='none';
   document.getElementById('gameContainer').style.display='none';
   document.getElementById('ui').style.display='flex';
   document.getElementById('codeBox').style.display='none';
   document.getElementById('codeIn').value='';
-  setBtns(false);st('');
+  setBtns(false); st('');
 }
 
 loop();
